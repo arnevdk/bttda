@@ -1,0 +1,5 @@
+moabb
+seaborn
+tensorly
+jupyter
+sklearn
