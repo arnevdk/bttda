@@ -13,5 +13,5 @@ epochs, labels, _ = paradigm.process_raw(raw, dataset, return_epochs=True)
 X = epochs.get_data()
 y = labels
 
-hoda = HODA(max_iter=100, rank=(2,2), tol=1e-12, initialize ='random', verbose=True)
+hoda = HODA(max_iter=128, rank=(6,6), tol=1e-12, initialize ='random', verbose=True)
 hoda.fit(X,y)

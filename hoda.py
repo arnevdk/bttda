@@ -6,6 +6,9 @@ import tensorly as tl
 from line_profiler_pycharm import profile
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.covariance import shrunk_covariance
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.metrics import roc_auc_score
+from sklearn.utils.extmath import randomized_svd
 
 
 class HODA(BaseEstimator, TransformerMixin):
@@ -19,6 +22,7 @@ class HODA(BaseEstimator, TransformerMixin):
         initialize="identity",
         shrinkage="oas",
         verbose=False,
+        solver="eig",
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -28,10 +32,11 @@ class HODA(BaseEstimator, TransformerMixin):
         self.initialize = initialize
         self.shrinkage = shrinkage
         self.verbose = verbose
+        self.solver = solver
 
     @profile
     def fit(self, X, y):
-
+        X_orig = X.copy()
         # Calculate properties
         X = tl.tensor(X)
         dtype = X.dtype
@@ -53,9 +58,9 @@ class HODA(BaseEstimator, TransformerMixin):
                         prod *= shape[k2]
                 self.rank_[k] = min(shape[k], (n_classes - 1) * prod)
         if self.toeplitz is not None and (self.toeplitz >= order or self.toeplitz < 0):
-            raise ValueError(f"Toeplitz mode must bu between 0 and {self.order-1}")
+            raise ValueError(f"Toeplitz mode must bu between 0 and {self.order - 1}")
         if self.taper is not None and (self.taper >= order or self.taper < 0):
-            raise ValueError(f"Taper mode must bu between 0 and {self.order-1}")
+            raise ValueError(f"Taper mode must bu between 0 and {self.order - 1}")
 
         # Construct tapers
         tapers = [None] * order
@@ -84,10 +89,11 @@ class HODA(BaseEstimator, TransformerMixin):
             if self.initialize == "identity":
                 self.projs_[k] = tl.eye(shape[k], self.rank_[k], dtype=dtype)
             elif self.initialize == "random":
-                self.projs_[k] = (
-                    np.random.rand(shape[k], self.rank_[k])
-                    + np.random.rand(shape[k], self.rank_[k]) * 1j
-                )
+                self.projs_[k] = np.random.rand(shape[k], self.rank_[k])
+                if np.iscomplexobj(X):
+                    self.projs_[k] = self.projs_[k].astype(dtype)
+                    self.projs_[k] += np.random.rand(shape[k], self.rank_[k]) * 1j
+
             elif self.initialize == "svd":
                 Xt = tl.unfold(X, k + 1).T
                 _, _, Vt = scipy.sparse.linalg.svds(
@@ -99,6 +105,7 @@ class HODA(BaseEstimator, TransformerMixin):
 
         # Find projections
         self.updates_ = np.zeros((order, self.max_iter), dtype=float)
+        self.objective_ = np.zeros((self.max_iter), dtype=float)
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
         for self.iter_ in range(self.max_iter):
@@ -106,29 +113,25 @@ class HODA(BaseEstimator, TransformerMixin):
                 print(f"Iteration {self.iter_}", end="  ")
             new_projs = [None] * order
             for k in range(order):
-                # Project X to mode k
                 X_proj = self._project(X, k)
-                """
-                X_proj = tl.tenalg.multi_mode_dot(X, self.projs_,
-                                                  modes=range(1, order + 1),
-                                                  skip=k, transpose=True)
-                """
-                class_means_proj = self._project(self.class_means_, k)
-                mean_proj = self._project(self.mean_[np.newaxis], k).squeeze()
-                # Unfold
-                X_proj = tl.base.partial_unfold(X_proj, k, skip_begin=1)
-                class_means_proj = tl.base.partial_unfold(
-                    class_means_proj, k, skip_begin=1
-                )
-                mean_proj = tl.base.unfold(mean_proj, k)
-
-                unfold_shape = X_proj.shape[1:]
 
                 # Calculate whithin class scatter
+
+                X_proj = tl.base.partial_unfold(X_proj, k, skip_begin=1)
+                X_proj_H = X_proj.conj().transpose((1, 0, 2))
                 scatter_w = np.zeros((shape[k], shape[k]), dtype=dtype)
-                for j in range(unfold_shape[-1]):
-                    scatter_w += X_proj[:, :, j].conj().T @ X_proj[:, :, j]
+                for j in range(X_proj.shape[-1]):
+                    scatter_w += X_proj_H[:, :, j] @ X_proj[:, :, j]
+
+                """
+                X_proj = tl.base.unfold(X_proj, k+1)
+                scatter_w = X_proj @ X_proj.conj().T
                 scatter_w /= np.trace(scatter_w) / shape[k]
+                """
+                """
+                modes = [k2 for k2 in range(order+1) if k2!=k+1]
+                scatter_w = tl.tenalg.tensordot(X_proj, X_proj.conj(), modes=modes)
+                """
                 if self.toeplitz is not None and self.toeplitz == k:
                     scatter_w = force_toeplitz(scatter_w)
                     scatter_w = scipy.linalg.toeplitz(scatter_w)
@@ -138,7 +141,6 @@ class HODA(BaseEstimator, TransformerMixin):
                     shrinkage = oas(scatter_w, n_samples)
                 else:
                     shrinkage = 0
-                # scatter_w = shrunk_covariance(scatter_w, shrinkage)
                 mu = np.trace(scatter_w) / shape[k]
                 scatter_w = (1 - shrinkage) * scatter_w + shrinkage * mu * np.identity(
                     shape[k]
@@ -146,25 +148,46 @@ class HODA(BaseEstimator, TransformerMixin):
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
+                class_means_proj = self._project(self.class_means_, k)
+                mean_proj = self._project(self.mean_[np.newaxis], k).squeeze()
+                class_means_proj -= mean_proj[np.newaxis]
+                class_means_proj = tl.base.partial_unfold(
+                    class_means_proj, k, skip_begin=1
+                )
                 scatter_b = np.zeros((shape[k], shape[k]), dtype=dtype)
-                for j in range(unfold_shape[-1]):
-                    for c in range(n_classes):
-                        scatter_b += class_size[c] * np.outer(
-                            class_means_proj[c, :, j] - mean_proj[:, j],
-                            class_means_proj[c, :, j] - mean_proj[:, j],
-                        )
+                for c in range(n_classes):
+                    scatter_b += (
+                        class_size[c]
+                        * class_means_proj[c]
+                        @ class_means_proj[c].conj().T
+                    )
                 self.scatter_b_[k] = scatter_b
 
-                # Calculate new projection by solving generalized eigenvalue
-                # problem
-                _, Uk = scipy.linalg.eigh(
-                    scatter_b,
-                    scatter_w,
-                    subset_by_index=[shape[k] - self.rank_[k], shape[k] - 1],
-                )
+                if self.solver == "eig":
+                    # Calculate new projection by solving generalized eigenvalue
+                    # problem
+                    _, Uk = scipy.linalg.eigh(
+                        scatter_b,
+                        scatter_w,
+                        subset_by_index=[shape[k] - self.rank_[k], shape[k] - 1],
+                    )
 
+                elif self.solver == "svd":
+                    # Uk, _, _ = randomized_svd(
+                    #    scipy.linalg.pinvh(scatter_w) @ scatter_b,
+                    #    n_components=self.rank_[k],
+                    # )
+                    Uk, _, _ = scipy.linalg.svd(
+                        scipy.linalg.pinvh(scatter_w) @ scatter_b
+                    )
+                    Uk = Uk[:, : self.rank_[k]]
+                elif self.solver == "seig":
+                    _, Uk = scipy.linalg.eigh(
+                        scipy.linalg.pinvh(scatter_w) @ scatter_b,
+                        subset_by_index=[shape[k] - self.rank_[k], shape[k] - 1],
+                    )
                 # Orthonormalize for stability
-                Uk, _ = gram_schmidt(Uk)
+                Uk, _ = scipy.linalg.qr(Uk, mode="economic")
                 new_projs[k] = Uk
 
             # Stopping criterion
@@ -177,14 +200,39 @@ class HODA(BaseEstimator, TransformerMixin):
                 if not self.updates_[k, self.iter_] < tol:
                     break_flag = False
             self.projs_ = new_projs
+            self.objective_[self.iter_] = self.fisher_ratio(self.transform(X_orig), y)
             if self.verbose:
-                print(f"updates: {self.updates_[:, self.iter_]}")
+                print(f"updates: {self.updates_[:, self.iter_]}", end="  ")
+                print(f"objective: {self.objective_[self.iter_]}")
             if break_flag:
                 break
         return self
 
+    def fisher_ratio(self, X, y):
+        classes = np.unique(y)
+        n_classes = len(classes)
+        dtype = X.dtype
+        class_size = np.zeros(len(self.classes_), dtype=int)
+        for c, cls in enumerate(self.classes_):
+            class_size[c] = np.count_nonzero(y == cls)
+        n_samples, n_features = X.shape
+        class_means = tl.zeros((n_classes, n_features), dtype=dtype)
+        for i, cls in enumerate(classes):
+            class_means[i] = np.mean(X[y == cls], axis=0)
+            X[y == cls] -= class_means[i][np.newaxis]
+        mean = np.mean(class_means, axis=0)
+        scatter_w = np.sum(scipy.linalg.norm(X, axis=1))
+        class_means -= mean[np.newaxis]
+        scatter_b = np.sum(scipy.linalg.norm(class_means, axis=1) * class_size)
+        return scatter_b / scatter_w
+
     @profile
     def _project(self, X, k):
+        order = len(X.shape) - 1
+        return tl.tenalg.multi_mode_dot(
+            X, self.projs_, modes=range(1, order + 1), skip=k, transpose=True
+        )
+        """
         order = len(X.shape) - 1
         X_proj = X
         for k2 in range(order):
@@ -192,47 +240,27 @@ class HODA(BaseEstimator, TransformerMixin):
                 U = self.projs_[k2]
                 X_proj = tl.tenalg.mode_dot(X_proj, U, mode=1 + k2, transpose=True)
         return X_proj
+        """
 
     def transform(self, X, y=None):
+        order = len(X.shape) - 1
+        X_trans = tl.tenalg.multi_mode_dot(
+            X, self.projs_, modes=range(1, order + 1), transpose=True
+        )
+        """
         order = len(X.shape) - 1
         X_trans = X.copy()
         for k in range(order):
             U = self.projs_[k]
             X_trans = tl.tenalg.mode_dot(X_trans, U, mode=1 + k, transpose=True)
-        return X_trans.reshape(X.shape[0], -1)
+        """
+        X_trans = X_trans.reshape(X.shape[0], -1)
+        if np.iscomplexobj(X_trans):
+            X_trans = np.hstack([np.real(X_trans), np.imag(X_trans)]).astype(np.float64)
+        return X_trans
 
 
-def gs(X, row_vecs=True, norm=True):
-    if not row_vecs:
-        X = X.T
-    Y = X[0:1, :].copy()
-    for i in range(1, X.shape[0]):
-        proj = np.diag((X[i, :].dot(Y.T) / np.linalg.norm(Y, axis=1) ** 2).flat).dot(Y)
-        Y = np.vstack((Y, X[i, :] - proj.sum(0)))
-    if norm:
-        Y = np.diag(1 / np.linalg.norm(Y, axis=1)).dot(Y)
-    if row_vecs:
-        return Y
-    else:
-        return Y.T
-
-
-def gram_schmidt(A):
-    """
-    Applies the Gram-Schmidt method to A
-    and returns Q and R, so Q*R = A.
-    """
-    R = np.zeros((A.shape[1], A.shape[1]), dtype=A.dtype)
-    Q = np.zeros_like(A)
-    for k in range(0, A.shape[1]):
-        R[k, k] = np.sqrt(np.dot(A[:, k], A[:, k]))
-        Q[:, k] = A[:, k] / R[k, k]
-        for j in range(k + 1, A.shape[1]):
-            R[k, j] = np.dot(Q[:, k], A[:, j])
-            A[:, j] = A[:, j] - R[k, j] * Q[:, k]
-    return Q, R
-
-
+@profile
 def force_toeplitz(cov):
     """Coerce the calculated empirical covariance to a Toeplitz-structured
     matrix by setting each diagonal to its mean value.
@@ -245,6 +273,7 @@ def force_toeplitz(cov):
     return toeplitz
 
 
+@profile
 def oas(cov, n_epochs):
     """Calculate the Oracle Approximating Shrinkage coefficient
 
