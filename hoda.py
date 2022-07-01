@@ -1,3 +1,4 @@
+import ipdb
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg
@@ -134,7 +135,6 @@ class HODA(BaseEstimator, TransformerMixin):
                 """
                 if self.toeplitz is not None and self.toeplitz == k:
                     scatter_w = force_toeplitz(scatter_w)
-                    scatter_w = scipy.linalg.toeplitz(scatter_w)
                 if self.taper is not None and self.toeplitz == k:
                     scatter_w *= tapers[k]
                 if self.shrinkage == "oas":
@@ -177,13 +177,25 @@ class HODA(BaseEstimator, TransformerMixin):
                     #    scipy.linalg.pinvh(scatter_w) @ scatter_b,
                     #    n_components=self.rank_[k],
                     # )
+                    if self.toeplitz == k:
+                        scatter_w_inv = scipy.linalg.solve_toeplitz(
+                            scatter_w[:, 0], np.identity(shape[k], dtype=dtype)
+                        )
+                    else:
+                        scatter_w_inv = scipy.linalg.pinv(scatter_w)
                     Uk, _, _ = scipy.linalg.svd(
-                        scipy.linalg.pinvh(scatter_w) @ scatter_b
+                        scatter_w_inv @ scatter_b,
                     )
                     Uk = Uk[:, : self.rank_[k]]
                 elif self.solver == "seig":
+                    if self.toeplitz == k:
+                        scatter_w_inv = scipy.linalg.solve_toeplitz(
+                            scatter_w[:, 0], np.identity(shape[k], dtype=dtype)
+                        )
+                    else:
+                        scatter_w_inv = scipy.linalg.pinv(scatter_w)
                     _, Uk = scipy.linalg.eigh(
-                        scipy.linalg.pinvh(scatter_w) @ scatter_b,
+                        scatter_w_inv @ scatter_b,
                         subset_by_index=[shape[k] - self.rank_[k], shape[k] - 1],
                     )
                 # Orthonormalize for stability
@@ -265,11 +277,11 @@ def force_toeplitz(cov):
     """Coerce the calculated empirical covariance to a Toeplitz-structured
     matrix by setting each diagonal to its mean value.
     """
-
     n_features = cov.shape[0]
     toeplitz = np.zeros_like(cov[:, 0])
     for i in range(n_features):
-        toeplitz[i] = np.mean(np.diag(cov, k=i))
+        toeplitz[i] = np.mean(np.diag(cov, k=-i))
+    toeplitz = scipy.linalg.toeplitz(toeplitz)
     return toeplitz
 
 
@@ -302,14 +314,13 @@ def oas(cov, n_epochs):
     """
     n_features = cov.shape[0]
     tr_cov = np.trace(cov)
-    cov2 = cov.dot(cov)
+    cov2 = cov @ cov.conj().T
     tr_cov2 = np.trace(cov2)
 
     num = tr_cov**2 + (1 - 2 / n_features) * tr_cov2
     den = (
         1 - n_epochs / n_features - (2 * n_epochs) / n_features**2
     ) * tr_cov**2 + (n_epochs + 1 + (2 * (n_epochs - 1)) / n_features) * tr_cov2
-    shrinkage = num / den
+    shrinkage = np.real(num / den)
     shrinkage = min(max(shrinkage, 0), 1)
-    # print(shrinkage)
     return shrinkage
