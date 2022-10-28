@@ -1,15 +1,12 @@
+import warnings
+
 import ipdb
-import matplotlib.pyplot as plt
+import jax.scipy as scipy
 import numpy as np
 import scipy.linalg
-import seaborn as sns
 import tensorly as tl
-from line_profiler_pycharm import profile
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.covariance import shrunk_covariance
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.metrics import roc_auc_score
-from sklearn.utils.extmath import randomized_svd
+from tensorly import random as tl_random
 
 
 class HODA(BaseEstimator, TransformerMixin):
@@ -17,13 +14,13 @@ class HODA(BaseEstimator, TransformerMixin):
         self,
         max_iter=100,
         tol=1e-13,
-        toeplitz=1,
-        taper=1,
+        toeplitz=(1, 2),
+        taper=None,
         rank=None,
         initialize="identity",
-        shrinkage="oas",
+        shrinkage="lw",
         verbose=False,
-        solver="eig",
+        tl_context=None,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -33,14 +30,16 @@ class HODA(BaseEstimator, TransformerMixin):
         self.initialize = initialize
         self.shrinkage = shrinkage
         self.verbose = verbose
-        self.solver = solver
+        self.tl_context = tl_context
 
-    @profile
     def fit(self, X, y):
-        X_orig = X.copy()
-        # Calculate properties
-        X = tl.tensor(X)
-        dtype = X.dtype
+        tl_context = self.tl_context
+        if self.tl_context is None:
+            tl_context = dict()
+        X_orig = tl.tensor(X.copy(), **tl_context)
+        X = tl.tensor(X, **tl_context)
+
+        # Calculate class means
         self.classes_ = np.unique(y)
         n_classes = len(self.classes_)
         class_size = np.zeros(len(self.classes_), dtype=int)
@@ -49,56 +48,44 @@ class HODA(BaseEstimator, TransformerMixin):
         n_samples = X.shape[0]
         shape = X.shape[1:]
         order = len(shape)
-        self.rank_ = self.rank
-        if self.rank_ is None:
-            self.rank_ = [0] * order
-            for k in range(order):
-                prod = 1
-                for k2 in range(order):
-                    if k != k2:
-                        prod *= shape[k2]
-                self.rank_[k] = min(shape[k], (n_classes - 1) * prod)
-        if self.toeplitz is not None and (self.toeplitz >= order or self.toeplitz < 0):
-            raise ValueError(f"Toeplitz mode must bu between 0 and {self.order - 1}")
-        if self.taper is not None and (self.taper >= order or self.taper < 0):
-            raise ValueError(f"Taper mode must bu between 0 and {self.order - 1}")
 
         # Construct tapers
         tapers = [None] * order
         for k in range(order):
             if k == self.taper:
                 taper = np.linspace(1, 0, num=shape[k])
-                tapers[k] = np.zeros((shape[k], shape[k]), dtype=dtype)
+                tapers[k] = tl.zeros((shape[k], shape[k]), **tl_context)
                 for i in range(shape[k]):
                     taper_vec = np.repeat(taper[i], shape[k] - i)
                     tapers[k] += np.diag(taper_vec, i)
                     if i != 0:
                         tapers[k] += np.diag(taper_vec, -i)
             else:
-                tapers[k] = np.ones((shape[k], shape[k]), dtype=dtype)
+                tapers[k] = tl.ones((shape[k], shape[k]), **tl_context)
 
         # Calculate means and center
-        self.class_means_ = tl.zeros((n_classes, *shape), dtype=dtype)
+        self.class_means_ = tl.zeros((n_classes, *shape), **tl_context)
         for i, cls in enumerate(self.classes_):
-            self.class_means_[i] = tl.mean(X[y == cls], axis=0)
-            X[y == cls] -= self.class_means_[i]
+            self.class_means_ = self.class_means_.at[i].set(
+                tl.mean(X[y == cls], axis=0)
+            )
+            X = X.at[y == cls].set(X[y == cls] - self.class_means_[i])
         self.mean_ = tl.mean(self.class_means_, axis=0)
 
         # Initialize projections
         self.projs_ = [None] * order
         for k in range(order):
             if self.initialize == "identity":
-                self.projs_[k] = tl.eye(shape[k], self.rank_[k], dtype=dtype)
+                self.projs_[k] = tl.eye(shape[k], self.rank[k], **tl_context)
             elif self.initialize == "random":
-                self.projs_[k] = np.random.rand(shape[k], self.rank_[k])
-                if np.iscomplexobj(X):
-                    self.projs_[k] = self.projs_[k].astype(dtype)
-                    self.projs_[k] += np.random.rand(shape[k], self.rank_[k]) * 1j
-
+                self.projs_[k] = tl_random.random_tensor(
+                    shape=(shape[k], self.rank[k]), **tl_context
+                )
+                self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
                 Xt = tl.unfold(X, k + 1).T
                 _, _, Vt = scipy.sparse.linalg.svds(
-                    Xt, k=self.rank[k], return_singular_vectors="vh"
+                    Xt, k=shape[k], return_singular_vectors="vh"
                 )
                 self.projs_[k] = Vt.T
             else:
@@ -111,148 +98,126 @@ class HODA(BaseEstimator, TransformerMixin):
         self.scatter_b_ = [None] * order
         for self.iter_ in range(self.max_iter):
             if self.verbose:
-                print(f"Iteration {self.iter_}", end="  ")
+                print(f"[{self.iter_}/{self.max_iter}]", end="  ")
             new_projs = [None] * order
             for k in range(order):
                 X_proj = self._project(X, k)
 
                 # Calculate whithin class scatter
 
-                X_proj = tl.base.partial_unfold(X_proj, k, skip_begin=1)
-                X_proj_H = X_proj.conj().transpose((1, 0, 2))
-                scatter_w = np.zeros((shape[k], shape[k]), dtype=dtype)
-                for j in range(X_proj.shape[-1]):
-                    scatter_w += X_proj_H[:, :, j] @ X_proj[:, :, j]
-
-                """
-                X_proj = tl.base.unfold(X_proj, k+1)
+                X_proj = tl.base.unfold(X_proj, k + 1)
                 scatter_w = X_proj @ X_proj.conj().T
-                scatter_w /= np.trace(scatter_w) / shape[k]
-                """
-                """
-                modes = [k2 for k2 in range(order+1) if k2!=k+1]
-                scatter_w = tl.tenalg.tensordot(X_proj, X_proj.conj(), modes=modes)
-                """
-                if self.toeplitz is not None and self.toeplitz == k:
+                scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
+
+                # modes = [k2 for k2 in range(order + 1) if k2 != k + 1]
+                # scatter_w = tl.tenalg.tensordot(X_proj, X_proj.conj(), modes=modes)
+
+                # Force toeplitz form
+                if self.toeplitz is not None and k in self.toeplitz:
                     scatter_w = force_toeplitz(scatter_w)
+                # Apply taper
                 if self.taper is not None and self.toeplitz == k:
                     scatter_w *= tapers[k]
-                if self.shrinkage == "oas":
-                    shrinkage = oas(scatter_w, n_samples)
+                # Normalize
+                scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
+                # Shrinkage regularization
+                if self.shrinkage == "lw":
+                    # shrinkage = schaefer_strimmer_shrinkage(
+                    #    X_proj.T, scatter_w, n_samples
+                    # )
+                    shrinkage = tl_ledoit_wolf_shrinkage(
+                        X_proj.T, n_samples, assume_centered=True
+                    )
                 else:
-                    shrinkage = 0
-                mu = np.trace(scatter_w) / shape[k]
-                scatter_w = (1 - shrinkage) * scatter_w + shrinkage * mu * np.identity(
-                    shape[k]
+                    shrinkage = self.shrinkage[k]
+                if self.verbose:
+                    print(f"shrinkage[{k}]={shrinkage:.4f}", end="  ")
+                mu = tl.sum(tl.diag(scatter_w)) / shape[k]
+                scatter_w = (1 - shrinkage) * scatter_w + shrinkage * mu * tl.eye(
+                    shape[k], **tl_context
                 )
+                # Force symmetry
+                scatter_w = (scatter_w + scatter_w.conj().T) / 2
+
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
                 class_means_proj = self._project(self.class_means_, k)
-                mean_proj = self._project(self.mean_[np.newaxis], k).squeeze()
-                class_means_proj -= mean_proj[np.newaxis]
+                mean_proj = self._project(self.mean_[np.newaxis], k)
+                class_means_proj -= mean_proj
                 class_means_proj = tl.base.partial_unfold(
                     class_means_proj, k, skip_begin=1
                 )
-                scatter_b = np.zeros((shape[k], shape[k]), dtype=dtype)
+                scatter_b = tl.zeros((shape[k], shape[k]), **tl_context)
                 for c in range(n_classes):
                     scatter_b += (
                         class_size[c]
                         * class_means_proj[c]
                         @ class_means_proj[c].conj().T
                     )
+                scatter_b = (scatter_b + scatter_b.conj().T) / 2
+                scatter_b /= tl.sum(tl.diag(scatter_b)) / shape[k]
                 self.scatter_b_[k] = scatter_b
 
-                if self.solver == "eig":
-                    # Calculate new projection by solving generalized eigenvalue
-                    # problem
-                    _, Uk = scipy.linalg.eigh(
-                        scatter_b,
-                        scatter_w,
-                        subset_by_index=[shape[k] - self.rank_[k], shape[k] - 1],
-                    )
-
-                elif self.solver == "svd":
-                    # Uk, _, _ = randomized_svd(
-                    #    scipy.linalg.pinvh(scatter_w) @ scatter_b,
-                    #    n_components=self.rank_[k],
-                    # )
-                    if self.toeplitz == k:
-                        scatter_w_inv = scipy.linalg.solve_toeplitz(
-                            scatter_w[:, 0], np.identity(shape[k], dtype=dtype)
-                        )
-                    else:
-                        scatter_w_inv = scipy.linalg.pinv(scatter_w)
-                    Uk, _, _ = scipy.linalg.svd(
-                        scatter_w_inv @ scatter_b,
-                    )
-                    Uk = Uk[:, : self.rank_[k]]
-                elif self.solver == "seig":
-                    if self.toeplitz == k:
-                        scatter_w_inv = scipy.linalg.solve_toeplitz(
-                            scatter_w[:, 0], np.identity(shape[k], dtype=dtype)
-                        )
-                    else:
-                        scatter_w_inv = scipy.linalg.pinv(scatter_w)
-                    _, Uk = scipy.linalg.eigh(
-                        scatter_w_inv @ scatter_b,
-                        subset_by_index=[shape[k] - self.rank_[k], shape[k] - 1],
-                    )
+                # Solve
+                eig_idc = [shape[k] - self.rank[k], shape[k] - 1]
+                w, v = scipy.linalg.eigh(scatter_b, scatter_w, subset_by_index=eig_idc)
+                v *= tl.sign(w)
+                v = v[:, ::-1]
                 # Orthonormalize for stability
-                Uk, _ = scipy.linalg.qr(Uk, mode="economic")
-                new_projs[k] = Uk
+                new_projs[k], _ = tl.qr(v, mode="reduced")
 
             # Stopping criterion
             break_flag = True
             for k in range(order):
                 tol = self.tol * np.prod(self.projs_[k].shape)
-                self.updates_[k, self.iter_] = np.abs(
-                    scipy.linalg.norm(new_projs[k] - self.projs_[k], ord="fro")
+                self.updates_[k, self.iter_] = tl.abs(
+                    tl.norm(new_projs[k] - self.projs_[k])
                 )
-                if not self.updates_[k, self.iter_] < tol:
-                    break_flag = False
+            if not self.updates_[k, self.iter_] < tol:
+                break_flag = False
             self.projs_ = new_projs
-            self.objective_[self.iter_] = self.fisher_ratio(self.transform(X_orig), y)
+            # self.objective_[self.iter_] = self.fisher_ratio(self.transform(X_orig), y)
             if self.verbose:
-                print(f"updates: {self.updates_[:, self.iter_]}", end="  ")
-                print(f"objective: {self.objective_[self.iter_]}")
+                print(f"step={np.mean(self.updates_[:, self.iter_]):.4e}", end="  ")
+                print(f"objective={self.objective_[self.iter_]:.4e}")
             if break_flag:
                 break
         return self
 
-    def fisher_ratio(self, X, y):
+    def fisher_ratio(self, X, y, assume_centered=False, class_means=None):
+        tl_context = self.tl_context
+        if tl_context is None:
+            tl_context = dict()
         classes = np.unique(y)
         n_classes = len(classes)
-        dtype = X.dtype
         class_size = np.zeros(len(self.classes_), dtype=int)
         for c, cls in enumerate(self.classes_):
             class_size[c] = np.count_nonzero(y == cls)
+        class_size = tl.tensor(class_size, **tl_context)
         n_samples, n_features = X.shape
-        class_means = tl.zeros((n_classes, n_features), dtype=dtype)
+        class_means = tl.zeros((n_classes, n_features), **tl_context)
         for i, cls in enumerate(classes):
-            class_means[i] = np.mean(X[y == cls], axis=0)
-            X[y == cls] -= class_means[i][np.newaxis]
-        mean = np.mean(class_means, axis=0)
-        scatter_w = np.sum(scipy.linalg.norm(X, axis=1))
+            class_means = class_means.at[i].set(tl.mean(X[y == cls], axis=0))
+            X = X.at[y == cls].set(X[y == cls] - class_means[i][np.newaxis])
+        mean = tl.mean(class_means, axis=0)
+        scatter_w = tl.sum(tl.norm(X, axis=1))
         class_means -= mean[np.newaxis]
-        scatter_b = np.sum(scipy.linalg.norm(class_means, axis=1) * class_size)
+        scatter_b = tl.sum(tl.norm(class_means, axis=1) * class_size)
         return scatter_b / scatter_w
 
-    @profile
     def _project(self, X, k):
+
         order = len(X.shape) - 1
         return tl.tenalg.multi_mode_dot(
             X, self.projs_, modes=range(1, order + 1), skip=k, transpose=True
         )
-        """
-        order = len(X.shape) - 1
-        X_proj = X
-        for k2 in range(order):
-            if k2 != k:
-                U = self.projs_[k2]
-                X_proj = tl.tenalg.mode_dot(X_proj, U, mode=1 + k2, transpose=True)
-        return X_proj
-        """
+        # X_proj = X
+        # for k2 in range(order):
+        #    if k2 != k:
+        #        U = self.projs_[k2]
+        #        X_proj = tl.tenalg.mode_dot(X_proj, U, mode=1 + k2, transpose=True)
+        # return X_proj
 
     def transform(self, X, y=None):
         order = len(X.shape) - 1
@@ -267,60 +232,113 @@ class HODA(BaseEstimator, TransformerMixin):
             X_trans = tl.tenalg.mode_dot(X_trans, U, mode=1 + k, transpose=True)
         """
         X_trans = X_trans.reshape(X.shape[0], -1)
-        if np.iscomplexobj(X_trans):
-            X_trans = np.hstack([np.real(X_trans), np.imag(X_trans)]).astype(np.float64)
         return X_trans
 
 
-@profile
+def tl_toeplitz(toeplitz, r=None):
+    # Form a 1-D array containing a reversed c followed by r[1:] that could be
+    # strided to give us toeplitz matrix.
+    n = len(toeplitz)
+    toeplitz_full = tl.zeros((n, n), dtype=toeplitz.dtype)
+    for i in range(n):
+        for j in range(n):
+            idx = abs(i - j)
+            toeplitz_full = toeplitz_full.at[i, j].set(toeplitz[idx])
+    return toeplitz_full
+
+
 def force_toeplitz(cov):
     """Coerce the calculated empirical covariance to a Toeplitz-structured
     matrix by setting each diagonal to its mean value.
     """
     n_features = cov.shape[0]
-    toeplitz = np.zeros_like(cov[:, 0])
+    toeplitz = tl.zeros_like(cov[:, 0])
     for i in range(n_features):
-        toeplitz[i] = np.mean(np.diag(cov, k=-i))
-    toeplitz = scipy.linalg.toeplitz(toeplitz)
+        diag = tl.diag(cov, k=i)
+        diag_mean = diag.mean()
+        toeplitz = toeplitz.at[i].set(diag_mean)
+    toeplitz = tl_toeplitz(toeplitz)
+
     return toeplitz
 
 
-@profile
-def oas(cov, n_epochs):
-    """Calculate the Oracle Approximating Shrinkage coefficient
+def schaefer_strimmer_shrinkage(X, cov, n_epochs):
+    context = dict(device=X.device, dtype=X.dtype)
+    n_features = X.sape[1]
+    nu = tl.sum(tl.diag(cov)) / n_features
+    num = 1
+    raise NotImplementedError
 
-    Oracle Approximating Shrinkage for empirical covariance matrices [1] or
-    Kronecker factor covariance matrices [2].
+    den = tl.sum(cov**2)
+    den -= tl.sum(tl.diag(cov**2))
+    den += tl.sum((tl.diag(cov) - nu) ** 2)
+    shrinkage = (n_epochs / (n_epochs - 1) ** 2) * (num / den)
+    return max(min(shrinkage, 1), 0)
 
-    [1] Y. Chen, A. Wiesel, Y. C. Eldar, and A. O. Hero, “Shrinkage algorithms
-    for MMSE covariance estimation,” IEEE Transactions on Signal Processing,
-    vol. 58, no. 10, Art. no. 10, Oct. 2010, doi: 10.1109/tsp.2010.2053029.
 
-    [2] L. Xie, Z. He, J. Tong, T. Liu, J. Li, and J. Xi, “Regularized
-    Estimation of Kronecker-Structured Covariance Matrix.” 2021.
+def tl_ledoit_wolf_shrinkage(
+    X,
+    n_epochs,
+    assume_centered=False,
+    block_size=1000,
+):
+    # for only one feature, the result is the same whatever the shrinkage
+    if len(X.shape) == 2 and X.shape[1] == 1:
+        return 0.0
+    if X.ndim == 1:
+        X = np.reshape(X, (1, -1))
 
-    Parameters
-    ----------
-    cov : array-like of shape (n_features, n_features)
-        The empirical covariance matrix before shrinkage.
+    if X.shape[0] == 1:
+        warnings.warn(
+            "Only one sample available. You may want to reshape your data array"
+        )
+    n_samples, n_features = X.shape
 
-    n_epochs : int
-        The number of epochs.
+    # optionally center data
+    if not assume_centered:
+        X = X - X.mean(0)
 
-    Returns
-    -------
-    shrinkage : float such that 0 <= shrinkage <= 1
-        The shrinkage coefficient calculated by Oracle Approximating Shrinkage.
-    """
-    n_features = cov.shape[0]
-    tr_cov = np.trace(cov)
-    cov2 = cov @ cov.conj().T
-    tr_cov2 = np.trace(cov2)
+    # A non-blocked version of the computation is present in the tests
+    # in tests/test_covariance.py
 
-    num = tr_cov**2 + (1 - 2 / n_features) * tr_cov2
-    den = (
-        1 - n_epochs / n_features - (2 * n_epochs) / n_features**2
-    ) * tr_cov**2 + (n_epochs + 1 + (2 * (n_epochs - 1)) / n_features) * tr_cov2
-    shrinkage = np.real(num / den)
-    shrinkage = min(max(shrinkage, 0), 1)
+    # number of blocks to split the covariance matrix into
+    n_splits = int(n_features / block_size)
+    X2 = X**2
+    emp_cov_trace = tl.sum(X2, axis=0) / n_samples
+    mu = tl.sum(emp_cov_trace) / n_features
+    beta_ = 0.0  # sum of the coefficients of <X2.T, X2>
+    delta_ = 0.0  # sum of the *squared* coefficients of <X.T, X>
+    # starting block computation
+    for i in range(n_splits):
+        for j in range(n_splits):
+            rows = slice(block_size * i, block_size * (i + 1))
+            cols = slice(block_size * j, block_size * (j + 1))
+            beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, cols]))
+            delta_ += tl.sum(tl.dot(X.T[rows], X[:, cols]) ** 2)
+        rows = slice(block_size * i, block_size * (i + 1))
+        beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, block_size * n_splits :]))
+        delta_ += tl.sum(tl.dot(X.T[rows], X[:, block_size * n_splits :]) ** 2)
+    for j in range(n_splits):
+        cols = slice(block_size * j, block_size * (j + 1))
+        beta_ += tl.sum(tl.dot(X2.T[block_size * n_splits :], X2[:, cols]))
+        delta_ += tl.sum(tl.dot(X.T[block_size * n_splits :], X[:, cols]) ** 2)
+    delta_ += tl.sum(
+        tl.dot(X.T[block_size * n_splits :], X[:, block_size * n_splits :]) ** 2
+    )
+
+    delta_ /= n_samples**2
+    beta_ += tl.sum(
+        tl.dot(X2.T[block_size * n_splits :], X2[:, block_size * n_splits :])
+    )
+    # use delta_ to compute beta
+    beta = 1.0 / (n_features * n_samples) * (beta_ / n_samples - delta_)
+    # delta is the sum of the squared coefficients of (<X.T,X> - mu*Id) / p
+    delta = delta_ - 2.0 * mu * emp_cov_trace.sum() + n_features * mu**2
+    delta /= n_features
+    # get final beta as the min between beta and delta
+    # We do this to prevent shrinking more than "1", which would invert
+    # the value of covariances
+    beta = min(beta, delta)
+    # finally get shrinkage
+    shrinkage = 0 if beta == 0 else beta / delta
     return shrinkage
