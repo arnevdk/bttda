@@ -1,7 +1,9 @@
-import warnings
+import math
 
 import ipdb
-import jax.scipy as scipy
+import jax
+import jax.numpy as jnp
+import jax.scipy as jscipy
 import numpy as np
 import scipy.linalg
 import tensorly as tl
@@ -14,21 +16,19 @@ class HODA(BaseEstimator, TransformerMixin):
         self,
         max_iter=100,
         tol=1e-13,
-        toeplitz=(1, 2),
-        taper=None,
         rank=None,
         initialize="identity",
         shrinkage="lw",
+        toeplitz=None,
         verbose=False,
         tl_context=None,
     ):
         self.max_iter = max_iter
         self.tol = tol
-        self.toeplitz = toeplitz
-        self.taper = taper
         self.rank = rank
         self.initialize = initialize
         self.shrinkage = shrinkage
+        self.toeplitz = toeplitz
         self.verbose = verbose
         self.tl_context = tl_context
 
@@ -36,41 +36,13 @@ class HODA(BaseEstimator, TransformerMixin):
         tl_context = self.tl_context
         if self.tl_context is None:
             tl_context = dict()
-        X_orig = tl.tensor(X.copy(), **tl_context)
         X = tl.tensor(X, **tl_context)
 
-        # Calculate class means
-        self.classes_ = np.unique(y)
+        self.classes_, class_counts = np.unique(y, return_counts=True)
         n_classes = len(self.classes_)
-        class_size = np.zeros(len(self.classes_), dtype=int)
-        for c, cls in enumerate(self.classes_):
-            class_size[c] = np.count_nonzero(y == cls)
         n_samples = X.shape[0]
         shape = X.shape[1:]
         order = len(shape)
-
-        # Construct tapers
-        tapers = [None] * order
-        for k in range(order):
-            if k == self.taper:
-                taper = np.linspace(1, 0, num=shape[k])
-                tapers[k] = tl.zeros((shape[k], shape[k]), **tl_context)
-                for i in range(shape[k]):
-                    taper_vec = np.repeat(taper[i], shape[k] - i)
-                    tapers[k] += np.diag(taper_vec, i)
-                    if i != 0:
-                        tapers[k] += np.diag(taper_vec, -i)
-            else:
-                tapers[k] = tl.ones((shape[k], shape[k]), **tl_context)
-
-        # Calculate means and center
-        self.class_means_ = tl.zeros((n_classes, *shape), **tl_context)
-        for i, cls in enumerate(self.classes_):
-            self.class_means_ = self.class_means_.at[i].set(
-                tl.mean(X[y == cls], axis=0)
-            )
-            X = X.at[y == cls].set(X[y == cls] - self.class_means_[i])
-        self.mean_ = tl.mean(self.class_means_, axis=0)
 
         # Initialize projections
         self.projs_ = [None] * order
@@ -83,41 +55,46 @@ class HODA(BaseEstimator, TransformerMixin):
                 )
                 self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
-                Xt = tl.unfold(X, k + 1).T
-                _, _, Vt = scipy.sparse.linalg.svds(
-                    Xt, k=shape[k], return_singular_vectors="vh"
-                )
-                self.projs_[k] = Vt.T
+                raise NotImplementedError
             else:
                 raise ValueError("initialize should be one of {identity, random, svd}")
 
         # Find projections
-        self.updates_ = np.zeros((order, self.max_iter), dtype=float)
-        self.objective_ = np.zeros((self.max_iter), dtype=float)
+        self.updates_ = tl.zeros((order, self.max_iter))
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
+
         for self.iter_ in range(self.max_iter):
             if self.verbose:
                 print(f"[{self.iter_}/{self.max_iter}]", end="  ")
             new_projs = [None] * order
             for k in range(order):
                 X_proj = self._project(X, k)
+                X_proj = tl.base.partial_unfold(X_proj, mode=k, skip_begin=1)
+
+                class_means_proj = tl.zeros(
+                    (n_classes, *X_proj.shape[1:]), **tl_context
+                )
+                for ci, c in enumerate(self.classes_):
+                    mean = tl.mean(X_proj[y == c], axis=0)
+                    class_means_proj = class_means_proj.at[ci].set(mean)
+                    X_proj = X_proj.at[y == c].set(X_proj[y == c] - mean)
 
                 # Calculate whithin class scatter
-
-                X_proj = tl.base.unfold(X_proj, k + 1)
-                scatter_w = X_proj @ X_proj.conj().T
+                scatter_w = tl.zeros((shape[k], shape[k]))
+                for j in range(X_proj.shape[-1]):
+                    scatter_w += X_proj[:, :, j].conj().T @ X_proj[:, :, j]
                 scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
 
-                # modes = [k2 for k2 in range(order + 1) if k2 != k + 1]
-                # scatter_w = tl.tenalg.tensordot(X_proj, X_proj.conj(), modes=modes)
+                # Force symmetry
+                scatter_w = (scatter_w + scatter_w.conj().T) / 2
 
-                # Force toeplitz form
+                # Force toeplitz
                 if self.toeplitz is not None and k in self.toeplitz:
-                    scatter_w = force_toeplitz(scatter_w)
-                # Apply taper
-                if self.taper is not None and self.toeplitz == k:
-                    scatter_w *= tapers[k]
+                    scatter_w_toep = tl.zeros(shape[k])
+                    for f in range(shape[k]):
+                        scatter_w_toep.at[f].set(tl.mean(tl.diag(scatter_w, k=f)))
+
                 # Normalize
                 scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
                 # Shrinkage regularization
@@ -136,75 +113,53 @@ class HODA(BaseEstimator, TransformerMixin):
                 scatter_w = (1 - shrinkage) * scatter_w + shrinkage * mu * tl.eye(
                     shape[k], **tl_context
                 )
-                # Force symmetry
-                scatter_w = (scatter_w + scatter_w.conj().T) / 2
-
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
-                class_means_proj = self._project(self.class_means_, k)
-                mean_proj = self._project(self.mean_[np.newaxis], k)
-                class_means_proj -= mean_proj
-                class_means_proj = tl.base.partial_unfold(
-                    class_means_proj, k, skip_begin=1
-                )
-                scatter_b = tl.zeros((shape[k], shape[k]), **tl_context)
+                class_means_proj -= tl.mean(class_means_proj, axis=0)
+                scatter_b = tl.zeros((shape[k], shape[k]))
+                # for j in range(X_proj.shape[-1]):
+                #    for c in range(n_classes):
+                #        scatter_b += (
+                #            tl.tenalg.outer(
+                #                [class_means_proj[c, :, j], class_means_proj[c, :, j]]
+                #            )
+                #            * class_counts[c]
+                #        )
                 for c in range(n_classes):
                     scatter_b += (
-                        class_size[c]
-                        * class_means_proj[c]
-                        @ class_means_proj[c].conj().T
+                        class_means_proj[c] @ class_means_proj[c].T * class_counts[c]
                     )
+                # Force symmetry
                 scatter_b = (scatter_b + scatter_b.conj().T) / 2
+                # Normalize
                 scatter_b /= tl.sum(tl.diag(scatter_b)) / shape[k]
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
-                eig_idc = [shape[k] - self.rank[k], shape[k] - 1]
-                w, v = scipy.linalg.eigh(scatter_b, scatter_w, subset_by_index=eig_idc)
+                w, v = eigh(scatter_b, scatter_w)
                 v *= tl.sign(w)
                 v = v[:, ::-1]
+                v = v[:, : self.rank[k]]
                 # Orthonormalize for stability
-                new_projs[k], _ = tl.qr(v, mode="reduced")
+                v, _ = tl.qr(v, mode="reduced")
+                new_projs[k] = v
 
             # Stopping criterion
             break_flag = True
             for k in range(order):
-                tol = self.tol * np.prod(self.projs_[k].shape)
-                self.updates_[k, self.iter_] = tl.abs(
+                tol = self.tol * math.prod(self.projs_[k].shape)
+                self.updates_ = self.updates_.at[k, self.iter_].set(
                     tl.norm(new_projs[k] - self.projs_[k])
                 )
             if not self.updates_[k, self.iter_] < tol:
                 break_flag = False
             self.projs_ = new_projs
-            # self.objective_[self.iter_] = self.fisher_ratio(self.transform(X_orig), y)
             if self.verbose:
-                print(f"step={np.mean(self.updates_[:, self.iter_]):.4e}", end="  ")
-                print(f"objective={self.objective_[self.iter_]:.4e}")
+                print(f"step={tl.mean(self.updates_[:, self.iter_]):.4e}")
             if break_flag:
                 break
         return self
-
-    def fisher_ratio(self, X, y, assume_centered=False, class_means=None):
-        tl_context = self.tl_context
-        if tl_context is None:
-            tl_context = dict()
-        classes = np.unique(y)
-        n_classes = len(classes)
-        class_size = np.zeros(len(self.classes_), dtype=int)
-        for c, cls in enumerate(self.classes_):
-            class_size[c] = np.count_nonzero(y == cls)
-        class_size = tl.tensor(class_size, **tl_context)
-        n_samples, n_features = X.shape
-        class_means = tl.zeros((n_classes, n_features), **tl_context)
-        for i, cls in enumerate(classes):
-            class_means = class_means.at[i].set(tl.mean(X[y == cls], axis=0))
-            X = X.at[y == cls].set(X[y == cls] - class_means[i][np.newaxis])
-        mean = tl.mean(class_means, axis=0)
-        scatter_w = tl.sum(tl.norm(X, axis=1))
-        class_means -= mean[np.newaxis]
-        scatter_b = tl.sum(tl.norm(class_means, axis=1) * class_size)
-        return scatter_b / scatter_w
 
     def _project(self, X, k):
 
@@ -212,133 +167,128 @@ class HODA(BaseEstimator, TransformerMixin):
         return tl.tenalg.multi_mode_dot(
             X, self.projs_, modes=range(1, order + 1), skip=k, transpose=True
         )
-        # X_proj = X
-        # for k2 in range(order):
-        #    if k2 != k:
-        #        U = self.projs_[k2]
-        #        X_proj = tl.tenalg.mode_dot(X_proj, U, mode=1 + k2, transpose=True)
-        # return X_proj
 
     def transform(self, X, y=None):
         order = len(X.shape) - 1
         X_trans = tl.tenalg.multi_mode_dot(
             X, self.projs_, modes=range(1, order + 1), transpose=True
         )
-        """
-        order = len(X.shape) - 1
-        X_trans = X.copy()
-        for k in range(order):
-            U = self.projs_[k]
-            X_trans = tl.tenalg.mode_dot(X_trans, U, mode=1 + k, transpose=True)
-        """
         X_trans = X_trans.reshape(X.shape[0], -1)
         return X_trans
 
 
-def tl_toeplitz(toeplitz, r=None):
-    # Form a 1-D array containing a reversed c followed by r[1:] that could be
-    # strided to give us toeplitz matrix.
-    n = len(toeplitz)
-    toeplitz_full = tl.zeros((n, n), dtype=toeplitz.dtype)
-    for i in range(n):
-        for j in range(n):
-            idx = abs(i - j)
-            toeplitz_full = toeplitz_full.at[i, j].set(toeplitz[idx])
-    return toeplitz_full
+def _T(x):
+    return jnp.swapaxes(x, -1, -2)
 
 
-def force_toeplitz(cov):
-    """Coerce the calculated empirical covariance to a Toeplitz-structured
-    matrix by setting each diagonal to its mean value.
+def _H(x):
+    return jnp.conj(_T(x))
+
+
+def symmetrize(x):
+    return (x + _H(x)) / 2
+
+
+def standardize_angle(w, b):
+    if jnp.isrealobj(w):
+        return w * jnp.sign(w[0, :])
+    else:
+        # scipy does this: makes imag(b[0] @ w) = 1
+        assert not jnp.isrealobj(b)
+        bw = b[0] @ w
+        factor = bw / jnp.abs(bw)
+        w = w / factor[None, :]
+        sign = jnp.sign(w.real[0])
+        w = w * sign
+        return w
+
+
+@jax.custom_jvp  # jax.scipy.linalg.eigh doesn't support general problem i.e. b not None
+def eigh(a, b):
     """
-    n_features = cov.shape[0]
-    toeplitz = tl.zeros_like(cov[:, 0])
-    for i in range(n_features):
-        diag = tl.diag(cov, k=i)
-        diag_mean = diag.mean()
-        toeplitz = toeplitz.at[i].set(diag_mean)
-    toeplitz = tl_toeplitz(toeplitz)
+    Compute the solution to the symmetrized generalized eigenvalue problem.
 
-    return toeplitz
+    a_s @ w = b_s @ w @ np.diag(v)
+
+    where a_s = (a + a.H) / 2, b_s = (b + b.H) / 2 are the symmetrized versions of the
+    inputs and H is the Hermitian (conjugate transpose) operator.
+
+    For self-adjoint inputs the solution should be consistent with `scipy.linalg.eigh`
+    i.e.
+
+    v, w = eigh(a, b)
+    v_sp, w_sp = scipy.linalg.eigh(a, b)
+    np.testing.assert_allclose(v, v_sp)
+    np.testing.assert_allclose(w, standardize_angle(wk_sp))
+
+    Note this currently uses `jax.linalg.eig(jax.linalg.solve(b, a))`, which will be
+    slow because there is no GPU implementation of `eig` and it's just a generally
+    inefficient way of doing it. Future implementations should wrap cuda primitives.
+    This implementation is provided primarily as a means to test `eigh_jvp_rule`.
+
+    Args:
+        a: [n, n] float self-adjoint matrix (i.e. conj(transpose(a)) == a)
+        b: [n, n] float self-adjoint matrix (i.e. conj(transpose(b)) == b)
+
+    Returns:
+        v: eigenvalues of the generalized problem in ascending order.
+        w: eigenvectors of the generalized problem, normalized such that
+            w.H @ b @ w = I.
+    """
+    a = symmetrize(a)
+    b = symmetrize(b)
+    b_inv_a = jax.scipy.linalg.cho_solve(jax.scipy.linalg.cho_factor(b), a)
+    v, w = jax.jit(jax.numpy.linalg.eig, backend="cpu")(b_inv_a)
+    v = v.real
+    # with loops.Scope() as s:
+    #     for _ in s.cond_range(jnp.isrealobj)
+    if jnp.isrealobj(a) and jnp.isrealobj(b):
+        w = w.real
+    # reorder as ascending in w
+    order = jnp.argsort(v)
+    v = v.take(order, axis=0)
+    w = w.take(order, axis=1)
+    # renormalize so v.H @ b @ H == 1
+    norm2 = jax.vmap(lambda wi: (wi.conj() @ b @ wi).real, in_axes=1)(w)
+    norm = jnp.sqrt(norm2)
+    w = w / norm
+    w = standardize_angle(w, b)
+    return v, w
 
 
-def schaefer_strimmer_shrinkage(X, cov, n_epochs):
-    context = dict(device=X.device, dtype=X.dtype)
-    n_features = X.sape[1]
-    nu = tl.sum(tl.diag(cov)) / n_features
-    num = 1
-    raise NotImplementedError
+@eigh.defjvp
+def eigh_jvp_rule(primals, tangents):
+    """
+    Derivation based on Boedekker et al.
 
-    den = tl.sum(cov**2)
-    den -= tl.sum(tl.diag(cov**2))
-    den += tl.sum((tl.diag(cov) - nu) ** 2)
-    shrinkage = (n_epochs / (n_epochs - 1) ** 2) * (num / den)
-    return max(min(shrinkage, 1), 0)
+    https://arxiv.org/pdf/1701.00392.pdf
 
+    Note diagonal entries of Winv dW/dt != 0 as they claim.
+    """
+    a, b = primals
+    da, db = tangents
+    if not all(jnp.isrealobj(x) for x in (a, b, da, db)):
+        raise NotImplementedError("jvp only implemented for real inputs.")
+    da = symmetrize(da)
+    db = symmetrize(db)
 
-def tl_ledoit_wolf_shrinkage(
-    X,
-    n_epochs,
-    assume_centered=False,
-    block_size=1000,
-):
-    # for only one feature, the result is the same whatever the shrinkage
-    if len(X.shape) == 2 and X.shape[1] == 1:
-        return 0.0
-    if X.ndim == 1:
-        X = np.reshape(X, (1, -1))
+    v, w = eigh(a, b)
 
-    if X.shape[0] == 1:
-        warnings.warn(
-            "Only one sample available. You may want to reshape your data array"
-        )
-    n_samples, n_features = X.shape
+    # compute only the diagonal entries
+    dv = jax.vmap(
+        lambda vi, wi: -wi.conj() @ db @ wi * vi + wi.conj() @ da @ wi,
+        in_axes=(0, 1),
+    )(v, w)
 
-    # optionally center data
-    if not assume_centered:
-        X = X - X.mean(0)
+    dv = dv.real
 
-    # A non-blocked version of the computation is present in the tests
-    # in tests/test_covariance.py
+    E = v[jnp.newaxis, :] - v[:, jnp.newaxis]
 
-    # number of blocks to split the covariance matrix into
-    n_splits = int(n_features / block_size)
-    X2 = X**2
-    emp_cov_trace = tl.sum(X2, axis=0) / n_samples
-    mu = tl.sum(emp_cov_trace) / n_features
-    beta_ = 0.0  # sum of the coefficients of <X2.T, X2>
-    delta_ = 0.0  # sum of the *squared* coefficients of <X.T, X>
-    # starting block computation
-    for i in range(n_splits):
-        for j in range(n_splits):
-            rows = slice(block_size * i, block_size * (i + 1))
-            cols = slice(block_size * j, block_size * (j + 1))
-            beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, cols]))
-            delta_ += tl.sum(tl.dot(X.T[rows], X[:, cols]) ** 2)
-        rows = slice(block_size * i, block_size * (i + 1))
-        beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, block_size * n_splits :]))
-        delta_ += tl.sum(tl.dot(X.T[rows], X[:, block_size * n_splits :]) ** 2)
-    for j in range(n_splits):
-        cols = slice(block_size * j, block_size * (j + 1))
-        beta_ += tl.sum(tl.dot(X2.T[block_size * n_splits :], X2[:, cols]))
-        delta_ += tl.sum(tl.dot(X.T[block_size * n_splits :], X[:, cols]) ** 2)
-    delta_ += tl.sum(
-        tl.dot(X.T[block_size * n_splits :], X[:, block_size * n_splits :]) ** 2
-    )
+    # diagonal entries: compute as column then put into diagonals
+    diags = jnp.diag(-0.5 * jax.vmap(lambda wi: wi.conj() @ db @ wi, in_axes=1)(w))
+    # off-diagonals: there will be NANs on the diagonal, but these aren't used
+    off_diags = jnp.reciprocal(E) * (_H(w) @ (da @ w - db @ w * v[jnp.newaxis, :]))
 
-    delta_ /= n_samples**2
-    beta_ += tl.sum(
-        tl.dot(X2.T[block_size * n_splits :], X2[:, block_size * n_splits :])
-    )
-    # use delta_ to compute beta
-    beta = 1.0 / (n_features * n_samples) * (beta_ / n_samples - delta_)
-    # delta is the sum of the squared coefficients of (<X.T,X> - mu*Id) / p
-    delta = delta_ - 2.0 * mu * emp_cov_trace.sum() + n_features * mu**2
-    delta /= n_features
-    # get final beta as the min between beta and delta
-    # We do this to prevent shrinking more than "1", which would invert
-    # the value of covariances
-    beta = min(beta, delta)
-    # finally get shrinkage
-    shrinkage = 0 if beta == 0 else beta / delta
-    return shrinkage
+    dw = w @ jnp.where(jnp.eye(a.shape[0], dtype=np.bool), diags, off_diags)
+
+    return (v, w), (dv, dw)
