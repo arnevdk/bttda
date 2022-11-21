@@ -7,8 +7,29 @@ import jax.scipy as jscipy
 import numpy as np
 import scipy.linalg
 import tensorly as tl
+import tensorly.decomposition
+import tensorly.tenalg
 from sklearn.base import BaseEstimator, TransformerMixin
 from tensorly import random as tl_random
+
+
+class MLSVD(BaseEstimator, TransformerMixin):
+    def __init__(self, rank=None):
+        self.rank = rank
+
+    def fit(self, X, y=None):
+        modes = tuple(range(1, len(X.shape)))
+        _, self.factors_ = tensorly.decomposition.partial_tucker(
+            X, modes=modes, rank=self.rank
+        )
+        return self
+
+    def transform(self, X, y=None):
+        modes = tuple(range(1, len(X.shape)))
+        Xt = tensorly.tenalg.multi_mode_dot(
+            X, self.factors_, modes=modes, transpose=True
+        )
+        return Xt
 
 
 class HODA(BaseEstimator, TransformerMixin):
@@ -18,8 +39,9 @@ class HODA(BaseEstimator, TransformerMixin):
         tol=1e-13,
         rank=None,
         initialize="identity",
-        shrinkage="lw",
+        shrinkage="oas",
         toeplitz=None,
+        solver="gevd",
         verbose=False,
         tl_context=None,
     ):
@@ -29,6 +51,7 @@ class HODA(BaseEstimator, TransformerMixin):
         self.initialize = initialize
         self.shrinkage = shrinkage
         self.toeplitz = toeplitz
+        self.solver = solver
         self.verbose = verbose
         self.tl_context = tl_context
 
@@ -40,7 +63,6 @@ class HODA(BaseEstimator, TransformerMixin):
 
         self.classes_, class_counts = np.unique(y, return_counts=True)
         n_classes = len(self.classes_)
-        n_samples = X.shape[0]
         shape = X.shape[1:]
         order = len(shape)
 
@@ -48,19 +70,20 @@ class HODA(BaseEstimator, TransformerMixin):
         self.projs_ = [None] * order
         for k in range(order):
             if self.initialize == "identity":
-                self.projs_[k] = tl.eye(shape[k], self.rank[k], **tl_context)
+                self.projs_[k] = tl.eye(shape[k], self.rank, **tl_context)
             elif self.initialize == "random":
                 self.projs_[k] = tl_random.random_tensor(
-                    shape=(shape[k], self.rank[k]), **tl_context
+                    shape=(shape[k], self.rank), **tl_context
                 )
                 self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
-                raise NotImplementedError
+                x = tl.unfold(X, k + 1)
+                self.projs_[k], _, _ = tl.partial_svd(x, n_eigenvecs=self.rank)
             else:
                 raise ValueError("initialize should be one of {identity, random, svd}")
 
         # Find projections
-        self.updates_ = tl.zeros((order, self.max_iter))
+        self.updates_ = []
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
 
@@ -72,39 +95,39 @@ class HODA(BaseEstimator, TransformerMixin):
                 X_proj = self._project(X, k)
                 X_proj = tl.base.partial_unfold(X_proj, mode=k, skip_begin=1)
 
-                class_means_proj = tl.zeros(
-                    (n_classes, *X_proj.shape[1:]), **tl_context
-                )
+                class_means_proj = []
+                X_proj_centered = []
                 for ci, c in enumerate(self.classes_):
-                    mean = tl.mean(X_proj[y == c], axis=0)
-                    class_means_proj = class_means_proj.at[ci].set(mean)
-                    X_proj = X_proj.at[y == c].set(X_proj[y == c] - mean)
+                    where = y == c
+                    where = where.reshape((where.shape[0], 1, 1))
+                    mean = tl.mean(X_proj, axis=0, where=where)
+                    class_means_proj += [mean]
+                    X_proj_where = X_proj[y == c]
+                    X_proj_centered += [X_proj_where - mean]
+                class_means_proj = tl.stack(class_means_proj, axis=0)
 
                 # Calculate whithin class scatter
-                scatter_w = tl.zeros((shape[k], shape[k]))
-                for j in range(X_proj.shape[-1]):
-                    scatter_w += X_proj[:, :, j].conj().T @ X_proj[:, :, j]
-                scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
-
+                scatter_w = 0
+                for ci, c in enumerate(self.classes_):
+                    scatter_w += tl.tensordot(
+                        X_proj_centered[ci],
+                        X_proj_centered[ci].conj(),
+                        axes=([0, 2], [0, 2]),
+                    )
                 # Force symmetry
                 scatter_w = (scatter_w + scatter_w.conj().T) / 2
-
                 # Force toeplitz
                 if self.toeplitz is not None and k in self.toeplitz:
-                    scatter_w_toep = tl.zeros(shape[k])
+                    scatter_w_toep = [0] * shape[k]
                     for f in range(shape[k]):
-                        scatter_w_toep.at[f].set(tl.mean(tl.diag(scatter_w, k=f)))
-
+                        scatter_w_toep[f] = tl.mean(tl.diag(scatter_w, k=f))
+                        # scatter_w_toep[f] *= 1 - (f / (shape[k] - 1))
+                    scatter_w = scipy.linalg.toeplitz(scatter_w_toep)
                 # Normalize
-                scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
+                # scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
                 # Shrinkage regularization
-                if self.shrinkage == "lw":
-                    # shrinkage = schaefer_strimmer_shrinkage(
-                    #    X_proj.T, scatter_w, n_samples
-                    # )
-                    shrinkage = tl_ledoit_wolf_shrinkage(
-                        X_proj.T, n_samples, assume_centered=True
-                    )
+                if self.shrinkage == "oas":
+                    shrinkage = oas(scatter_w, X_proj.shape[0])
                 else:
                     shrinkage = self.shrinkage[k]
                 if self.verbose:
@@ -118,47 +141,47 @@ class HODA(BaseEstimator, TransformerMixin):
                 # Calculate between class scatter
                 class_means_proj -= tl.mean(class_means_proj, axis=0)
                 scatter_b = tl.zeros((shape[k], shape[k]))
-                # for j in range(X_proj.shape[-1]):
-                #    for c in range(n_classes):
-                #        scatter_b += (
-                #            tl.tenalg.outer(
-                #                [class_means_proj[c, :, j], class_means_proj[c, :, j]]
-                #            )
-                #            * class_counts[c]
-                #        )
                 for c in range(n_classes):
                     scatter_b += (
-                        class_means_proj[c] @ class_means_proj[c].T * class_counts[c]
+                        class_means_proj[c]
+                        @ class_means_proj[c].conj().T
+                        * class_counts[c]
                     )
                 # Force symmetry
                 scatter_b = (scatter_b + scatter_b.conj().T) / 2
                 # Normalize
-                scatter_b /= tl.sum(tl.diag(scatter_b)) / shape[k]
+                # scatter_b /= tl.sum(tl.diag(scatter_b)) / shape[k]
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
-                w, v = eigh(scatter_b, scatter_w)
-                v *= tl.sign(w)
-                v = v[:, ::-1]
-                v = v[:, : self.rank[k]]
+                if self.solver == "gevd":
+                    scatter_t = scatter_b + scatter_w
+                    subset = [shape[k] - self.rank, shape[k] - 1]
+                    w, v = scipy.linalg.eigh(
+                        scatter_b, scatter_t, subset_by_index=subset
+                    )
+                elif self.solver == "sr":
+                    raise NotImplementedError
+
                 # Orthonormalize for stability
                 v, _ = tl.qr(v, mode="reduced")
                 new_projs[k] = v
 
             # Stopping criterion
             break_flag = True
+            update = [0] * order
             for k in range(order):
                 tol = self.tol * math.prod(self.projs_[k].shape)
-                self.updates_ = self.updates_.at[k, self.iter_].set(
-                    tl.norm(new_projs[k] - self.projs_[k])
-                )
-            if not self.updates_[k, self.iter_] < tol:
-                break_flag = False
+                update[k] = tl.norm(new_projs[k] - self.projs_[k])
+                self.updates_.append(update)
+                if not update[k] < tol:
+                    break_flag = False
             self.projs_ = new_projs
             if self.verbose:
-                print(f"step={tl.mean(self.updates_[:, self.iter_]):.4e}")
+                print(f"step={(sum(update)/order):.4e}")
             if break_flag:
                 break
+        self.updates_ = tl.tensor(self.updates_, **tl_context)
         return self
 
     def _project(self, X, k):
@@ -292,3 +315,16 @@ def eigh_jvp_rule(primals, tangents):
     dw = w @ jnp.where(jnp.eye(a.shape[0], dtype=np.bool), diags, off_diags)
 
     return (v, w), (dv, dw)
+
+
+def oas(emp_cov, n_samples):
+    n_features = emp_cov.shape[0]
+    mu = np.trace(emp_cov) / n_features
+
+    # formula from Chen et al.'s **implementation**
+    alpha = np.mean(emp_cov**2)
+    num = alpha + mu**2
+    den = (n_samples + 1.0) * (alpha - (mu**2) / n_features)
+
+    shrinkage = np.real(num / den)
+    return max(min(shrinkage, 1), 0)
