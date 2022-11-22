@@ -84,6 +84,7 @@ class HODA(BaseEstimator, TransformerMixin):
 
         # Find projections
         self.updates_ = []
+        self.objective_ = []
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
 
@@ -92,7 +93,11 @@ class HODA(BaseEstimator, TransformerMixin):
                 print(f"[{self.iter_}/{self.max_iter}]", end="  ")
             new_projs = [None] * order
             for k in range(order):
-                X_proj = self._project(X, k)
+                modes = range(1, order + 1)
+                X_proj = tl.tenalg.multi_mode_dot(
+                    X, self.projs_, modes=modes, skip=k, transpose=True
+                )
+                # TODO: reshape is not necessary
                 X_proj = tl.base.partial_unfold(X_proj, mode=k, skip_begin=1)
 
                 class_means_proj = []
@@ -118,24 +123,12 @@ class HODA(BaseEstimator, TransformerMixin):
                 scatter_w = (scatter_w + scatter_w.conj().T) / 2
                 # Force toeplitz
                 if self.toeplitz is not None and k in self.toeplitz:
-                    scatter_w_toep = [0] * shape[k]
-                    for f in range(shape[k]):
-                        scatter_w_toep[f] = tl.mean(tl.diag(scatter_w, k=f))
-                        # scatter_w_toep[f] *= 1 - (f / (shape[k] - 1))
-                    scatter_w = scipy.linalg.toeplitz(scatter_w_toep)
-                # Normalize
-                # scatter_w /= tl.sum(tl.diag(scatter_w)) / shape[k]
-                # Shrinkage regularization
-                if self.shrinkage == "oas":
-                    shrinkage = oas(scatter_w, X_proj.shape[0])
-                else:
-                    shrinkage = self.shrinkage[k]
-                if self.verbose:
-                    print(f"shrinkage[{k}]={shrinkage:.4f}", end="  ")
-                mu = tl.sum(tl.diag(scatter_w)) / shape[k]
-                scatter_w = (1 - shrinkage) * scatter_w + shrinkage * mu * tl.eye(
-                    shape[k], **tl_context
-                )
+                    scatter_w = self._make_toeplitz(scatter_w)
+                # Shrink
+                shrinkage = self.shrinkage
+                if isinstance(shrinkage, tuple):
+                    shrinkage = shrinkage[k]
+                scatter_w = self._shrink(X_proj, scatter_w, shrinkage)
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
@@ -149,16 +142,15 @@ class HODA(BaseEstimator, TransformerMixin):
                     )
                 # Force symmetry
                 scatter_b = (scatter_b + scatter_b.conj().T) / 2
-                # Normalize
-                # scatter_b /= tl.sum(tl.diag(scatter_b)) / shape[k]
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
                 if self.solver == "gevd":
-                    scatter_t = scatter_b + scatter_w
+                    w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
+                    scatter_w = v @ tl.diag(w) @ v.conj().T
                     subset = [shape[k] - self.rank, shape[k] - 1]
                     w, v = scipy.linalg.eigh(
-                        scatter_b, scatter_t, subset_by_index=subset
+                        scatter_b, scatter_w, subset_by_index=subset
                     )
                 elif self.solver == "sr":
                     raise NotImplementedError
@@ -184,12 +176,24 @@ class HODA(BaseEstimator, TransformerMixin):
         self.updates_ = tl.tensor(self.updates_, **tl_context)
         return self
 
-    def _project(self, X, k):
+    def _make_toeplitz(self, scatter):
+        n_features, _ = scatter.shape
+        toep = [0] * n_features
+        for f in range(n_features):
+            toep[f] = tl.mean(tl.diag(scatter, k=f))
+        cov_toep = scipy.linalg.toeplitz(toep)
+        return cov_toep
 
-        order = len(X.shape) - 1
-        return tl.tenalg.multi_mode_dot(
-            X, self.projs_, modes=range(1, order + 1), skip=k, transpose=True
-        )
+    def _shrink(self, X_proj, scatter, shrinkage):
+        n_features, _ = scatter.shape
+        # Shrinkage regularization
+        if self.shrinkage == "oas":
+            shrinkage = oas(scatter, X_proj.shape[0])
+        if self.verbose:
+            print(f"shrinkage={shrinkage:.4f}", end="  ")
+        mu = tl.sum(tl.diag(scatter)) / n_features
+        scatter = (1 - shrinkage) * scatter + shrinkage * mu * tl.eye(n_features)
+        return scatter
 
     def transform(self, X, y=None):
         order = len(X.shape) - 1
