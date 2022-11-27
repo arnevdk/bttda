@@ -96,7 +96,7 @@ class HODA(BaseEstimator, TransformerMixin):
                 for ci, c in enumerate(self.classes_):
                     where = y == c
                     where = where.reshape((where.shape[0], 1, 1))
-                    mean = tl.mean(X_proj, axis=0, where=where)
+                    # mean = tl.mean(X_proj, axis=0, where=where)
                     X_proj_where = X_proj[y == c]
                     mean = tl.mean(X_proj_where, axis=0)
                     class_means_proj += [mean]
