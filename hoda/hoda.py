@@ -1,9 +1,11 @@
 import math
 
+import cupyx.scipy.linalg
 import cupyx.scipy.sparse.linalg
 import ipdb
 import numpy as np
 import scipy.linalg
+import scipy.sparse.linalg
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
@@ -52,6 +54,7 @@ class HODA(BaseEstimator, TransformerMixin):
         self.verbose = verbose
 
     def fit(self, X, y):
+        X = tl.tensor(X)
         self.classes_, class_counts = np.unique(y, return_counts=True)
         n_classes = len(self.classes_)
         shape = X.shape[1:]
@@ -83,6 +86,7 @@ class HODA(BaseEstimator, TransformerMixin):
             if self.verbose:
                 print(f"[{self.iter_}/{self.max_iter}]", end="  ")
             new_projs = [None] * order
+            update = [0] * order
             for k in range(order):
                 modes = range(1, order + 1)
                 X_proj = tl.tenalg.multi_mode_dot(
@@ -140,21 +144,28 @@ class HODA(BaseEstimator, TransformerMixin):
                 if self.solver == "gevd":
                     # w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
                     # scatter_w = v @ tl.diag(w) @ v.conj().T
-                    # subset = [shape[k] - self.rank, shape[k] - 1]
-                    # w, v = scipy.linalg.eigh(
-                    #    scatter_b, scatter_w, subset_by_index=subset
-                    # )
-                    if tl.get_backend() == "cupy":
-                        w, v = cupyx.scipy.sparse.linalg.lobpcg(
-                            scatter_b, self.projs_[k], B=scatter_w, largest=True
-                        )
-                    elif tl.get_backend() == "numpy":
-                        subset = [shape[k] - self.rank, shape[k] - 1]
-                        w, v = scipy.linalg.eigh(
-                            scatter_b, scatter_w, subset_by_index=subset
-                        )
-                    else:
-                        raise NotImplementedError
+                    subset = [shape[k] - self.rank, shape[k] - 1]
+                    w, v = scipy.linalg.eigh(
+                        scatter_b, scatter_w, subset_by_index=subset
+                    )
+                    # if tl.get_backend() == "cupy":
+                    #    w, v = cupyx.scipy.sparse.linalg.lobpcg(
+                    #        scatter_b,
+                    #        self.projs_[k],
+                    #        B=scatter_w,
+                    #        largest=True,
+                    #        maxiter=1,
+                    #    )
+                    # elif tl.get_backend() == "numpy":
+                    #    w, v = scipy.sparse.linalg.lobpcg(
+                    #        scatter_b,
+                    #        self.projs_[k],
+                    #        B=scatter_w,
+                    #        largest=True,
+                    #        maxiter=1,
+                    #    )
+                    # else:
+                    #    raise NotImplementedError
 
                 elif self.solver == "sr":
                     raise NotImplementedError
@@ -165,13 +176,13 @@ class HODA(BaseEstimator, TransformerMixin):
 
             # Stopping criterion
             break_flag = True
-            update = [0] * order
             for k in range(order):
                 tol = self.tol * math.prod(self.projs_[k].shape)
                 update[k] = tl.norm(new_projs[k] - self.projs_[k])
-                self.updates_.append(update)
                 if not update[k] < tol:
                     break_flag = False
+
+            self.updates_.append(update)
             self.projs_ = new_projs
             if self.verbose:
                 print(f"step={(sum(update)/order):.4e}")
@@ -185,7 +196,14 @@ class HODA(BaseEstimator, TransformerMixin):
         toep = [0] * n_features
         for f in range(n_features):
             toep[f] = tl.mean(tl.diag(scatter, k=f))
-        cov_toep = scipy.linalg.toeplitz(toep)
+
+        toep = tl.tensor(toep)
+        if tl.get_backend() == "numpy":
+            cov_toep = scipy.linalg.toeplitz(toep)
+        elif tl.get_backend() == "cupy":
+            cov_toep = cupyx.scipy.linalg.toeplitz(toep)
+        else:
+            raise NotImplementedError
         return cov_toep
 
     def _shrink(self, X_proj, scatter, shrinkage):
@@ -200,12 +218,13 @@ class HODA(BaseEstimator, TransformerMixin):
         return scatter
 
     def transform(self, X, y=None):
+        X = tl.tensor(X)
         order = len(X.shape) - 1
         X_trans = tl.tenalg.multi_mode_dot(
             X, self.projs_, modes=range(1, order + 1), transpose=True
         )
         X_trans = X_trans.reshape(X.shape[0], -1)
-        return X_trans
+        return tl.to_numpy(X_trans)
 
 
 def oas(emp_cov, n_samples):
