@@ -1,5 +1,6 @@
 import math
 
+import cupyx.scipy.sparse.linalg
 import ipdb
 import numpy as np
 import scipy.linalg
@@ -40,7 +41,6 @@ class HODA(BaseEstimator, TransformerMixin):
         toeplitz=None,
         solver="gevd",
         verbose=False,
-        tl_context=None,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -50,14 +50,8 @@ class HODA(BaseEstimator, TransformerMixin):
         self.toeplitz = toeplitz
         self.solver = solver
         self.verbose = verbose
-        self.tl_context = tl_context
 
     def fit(self, X, y):
-        tl_context = self.tl_context
-        if self.tl_context is None:
-            tl_context = dict()
-        X = tl.tensor(X, **tl_context)
-
         self.classes_, class_counts = np.unique(y, return_counts=True)
         n_classes = len(self.classes_)
         shape = X.shape[1:]
@@ -67,10 +61,10 @@ class HODA(BaseEstimator, TransformerMixin):
         self.projs_ = [None] * order
         for k in range(order):
             if self.initialize == "identity":
-                self.projs_[k] = tl.eye(shape[k], self.rank, **tl_context)
+                self.projs_[k] = tl.eye(shape[k], self.rank)
             elif self.initialize == "random":
                 self.projs_[k] = tl_random.random_tensor(
-                    shape=(shape[k], self.rank), **tl_context
+                    shape=(shape[k], self.rank),
                 )
                 self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
@@ -103,8 +97,9 @@ class HODA(BaseEstimator, TransformerMixin):
                     where = y == c
                     where = where.reshape((where.shape[0], 1, 1))
                     mean = tl.mean(X_proj, axis=0, where=where)
-                    class_means_proj += [mean]
                     X_proj_where = X_proj[y == c]
+                    mean = tl.mean(X_proj_where, axis=0)
+                    class_means_proj += [mean]
                     X_proj_centered += [X_proj_where - mean]
                 class_means_proj = tl.stack(class_means_proj, axis=0)
 
@@ -143,12 +138,24 @@ class HODA(BaseEstimator, TransformerMixin):
 
                 # Solve
                 if self.solver == "gevd":
-                    w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
-                    scatter_w = v @ tl.diag(w) @ v.conj().T
-                    subset = [shape[k] - self.rank, shape[k] - 1]
-                    w, v = scipy.linalg.eigh(
-                        scatter_b, scatter_w, subset_by_index=subset
-                    )
+                    # w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
+                    # scatter_w = v @ tl.diag(w) @ v.conj().T
+                    # subset = [shape[k] - self.rank, shape[k] - 1]
+                    # w, v = scipy.linalg.eigh(
+                    #    scatter_b, scatter_w, subset_by_index=subset
+                    # )
+                    if tl.get_backend() == "cupy":
+                        w, v = cupyx.scipy.sparse.linalg.lobpcg(
+                            scatter_b, self.projs_[k], B=scatter_w, largest=True
+                        )
+                    elif tl.get_backend() == "numpy":
+                        subset = [shape[k] - self.rank, shape[k] - 1]
+                        w, v = scipy.linalg.eigh(
+                            scatter_b, scatter_w, subset_by_index=subset
+                        )
+                    else:
+                        raise NotImplementedError
+
                 elif self.solver == "sr":
                     raise NotImplementedError
 
@@ -170,7 +177,7 @@ class HODA(BaseEstimator, TransformerMixin):
                 print(f"step={(sum(update)/order):.4e}")
             if break_flag:
                 break
-        self.updates_ = tl.tensor(self.updates_, **tl_context)
+        self.updates_ = tl.tensor(self.updates_)
         return self
 
     def _make_toeplitz(self, scatter):
@@ -199,7 +206,6 @@ class HODA(BaseEstimator, TransformerMixin):
         )
         X_trans = X_trans.reshape(X.shape[0], -1)
         return X_trans
-
 
 
 def oas(emp_cov, n_samples):
