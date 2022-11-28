@@ -14,14 +14,25 @@ from tensorly import random as tl_random
 
 
 class MLSVD(BaseEstimator, TransformerMixin):
-    def __init__(self, rank=None):
+    def __init__(self, modes=None, rank=None):
+        self.modes = modes
         self.rank = rank
 
     def fit(self, X, y=None):
-        modes = tuple(range(1, len(X.shape)))
-        _, self.factors_ = tensorly.decomposition.partial_tucker(
-            X, modes=modes, rank=self.rank
+        shape = X.shape[1:]
+        order = len(shape)
+        modes = self.modes
+        if modes is None:
+            modes = np.arange(order)
+        else:
+            modes = np.asarray(modes)
+
+        self.factors_ = [np.eye(shape[k]) for k in range(order)]
+        _, factors = tensorly.decomposition.partial_tucker(
+            X, modes=modes + 1, rank=self.rank
         )
+        for mi, mode in enumerate(modes):
+            self.factors_[mode] = factors[mi]
         return self
 
     def transform(self, X, y=None):
@@ -141,34 +152,59 @@ class HODA(BaseEstimator, TransformerMixin):
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
-                if self.solver == "gevd":
-                    # w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
-                    # scatter_w = v @ tl.diag(w) @ v.conj().T
+                """
+                Multilinear Discriminant Analysis for
+                Higher-Order Tensor Data Classification
+                Qun Li, Member, IEEE and Dan Schonfeld, Fellow, IEE
+                """
+                if self.solver == "ratio-gevd":
+                    # Optimize scatter difference criterion
+                    w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
+                    scatter_w = v @ tl.diag(w) @ v.conj().T
                     subset = [shape[k] - self.rank, shape[k] - 1]
                     w, v = scipy.linalg.eigh(
                         scatter_b, scatter_w, subset_by_index=subset
                     )
-                    # if tl.get_backend() == "cupy":
-                    #    w, v = cupyx.scipy.sparse.linalg.lobpcg(
-                    #        scatter_b,
-                    #        self.projs_[k],
-                    #        B=scatter_w,
-                    #        largest=True,
-                    #        maxiter=1,
-                    #    )
-                    # elif tl.get_backend() == "numpy":
-                    #    w, v = scipy.sparse.linalg.lobpcg(
-                    #        scatter_b,
-                    #        self.projs_[k],
-                    #        B=scatter_w,
-                    #        largest=True,
-                    #        maxiter=1,
-                    #    )
-                    # else:
-                    #    raise NotImplementedError
+                elif self.solver == "ratio-gevd-lanczos":
+                    raise NotImplementedError
+                elif self.solver == "ratio-gevd-lobpcg":
+                    if tl.get_backend() == "cupy":
+                        w, v = cupyx.scipy.sparse.linalg.lobpcg(
+                            scatter_b,
+                            self.projs_[k],
+                            B=scatter_w,
+                            largest=True,
+                            maxiter=1,
+                        )
+                    elif tl.get_backend() == "numpy":
+                        w, v = scipy.sparse.linalg.lobpcg(
+                            scatter_b,
+                            self.projs_[k],
+                            B=scatter_w,
+                            largest=True,
+                            maxiter=1,
+                        )
+                    else:
+                        raise NotImplementedError
 
                 elif self.solver == "sr":
                     raise NotImplementedError
+                elif self.solver == "diff-svd":
+                    # Optimize scatter difference criterion
+                    WinvB = scipy.linalg.pinvh(scatter_w) @ scatter_b
+                    subset = [shape[k] - self.rank, shape[k] - 1]
+                    zeta = np.sum(scipy.linalg.eigvalsh(WinvB, subset_by_index=subset))
+                    zeta = 100
+                    if self.verbose:
+                        print(f"zeta={zeta:.4f}", end=" ")
+                    v, w, _ = tl.partial_svd(
+                        scatter_b - zeta * scatter_w, n_eigenvecs=self.rank, flip=False
+                    )
+                    pass
+                elif self.solver == "ratio-svd":
+                    raise NotImplementedError
+                else:
+                    raise ValueError
 
                 # Orthonormalize for stability
                 v, _ = tl.qr(v, mode="reduced")
