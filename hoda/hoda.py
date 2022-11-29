@@ -137,7 +137,9 @@ class HODA(BaseEstimator, TransformerMixin):
                 shrinkage = self.shrinkage
                 if isinstance(shrinkage, tuple):
                     shrinkage = shrinkage[k]
-                scatter_w = self._shrink(X.shape[0], scatter_w, shrinkage)
+                scatter_w, shrinkage = self._shrink(X.shape[0], scatter_w, shrinkage)
+                if self.verbose:
+                    print(f"shrinkage={shrinkage:.4f}", end="  ")
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
@@ -237,7 +239,7 @@ class HODA(BaseEstimator, TransformerMixin):
         toep = [0] * n_features
         for f in range(n_features):
             toep[f] = tl.mean(tl.diag(scatter, k=f))
-
+        toep *= np.linspace(1, 0, len(toep))
         toep = tl.tensor(toep)
         if tl.get_backend() == "numpy":
             cov_toep = scipy.linalg.toeplitz(toep)
@@ -250,13 +252,11 @@ class HODA(BaseEstimator, TransformerMixin):
     def _shrink(self, n_epochs, scatter, shrinkage):
         n_features, _ = scatter.shape
         # Shrinkage regularization
-        if self.shrinkage == "oas":
+        if shrinkage == "oas":
             shrinkage = oas(scatter, n_epochs)
-        if self.verbose:
-            print(f"shrinkage={shrinkage:.4f}", end="  ")
         mu = tl.sum(tl.diag(scatter)) / n_features
         scatter = (1 - shrinkage) * scatter + shrinkage * mu * tl.eye(n_features)
-        return scatter
+        return scatter, shrinkage
 
     def transform(self, X, y=None):
         X = tl.tensor(X)
@@ -264,7 +264,6 @@ class HODA(BaseEstimator, TransformerMixin):
         X_trans = tl.tenalg.multi_mode_dot(
             X, self.projs_, modes=range(1, order + 1), transpose=True
         )
-        X_trans = X_trans.reshape(X.shape[0], -1)
         return tl.to_numpy(X_trans)
 
 
