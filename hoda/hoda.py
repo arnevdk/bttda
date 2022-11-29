@@ -52,9 +52,8 @@ class HODA(BaseEstimator, TransformerMixin):
         initialize="ones",
         shrinkage="oas",
         toeplitz=None,
-        solver="gevd",
+        solver="ratio-gevd",
         verbose=False,
-        zeta=1,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -64,7 +63,6 @@ class HODA(BaseEstimator, TransformerMixin):
         self.toeplitz = toeplitz
         self.solver = solver
         self.verbose = verbose
-        self.zeta = zeta
 
     def fit(self, X, y):
         X = tl.tensor(X)
@@ -77,23 +75,24 @@ class HODA(BaseEstimator, TransformerMixin):
         self.projs_ = [None] * order
         for k in range(order):
             if self.initialize == "identity":
-                self.projs_[k] = tl.eye(shape[k], self.rank)
-            if self.initialize == "ones":
-                self.projs_[k] = tl.eye(shape[k], self.rank)
+                self.projs_[k] = tl.eye(shape[k], self.rank[k])
+            elif self.initialize == "ones":
+                self.projs_[k] = tl.eye(shape[k], self.rank[k])
             elif self.initialize == "random":
                 self.projs_[k] = tl_random.random_tensor(
-                    shape=(shape[k], self.rank),
+                    shape=(shape[k], self.rank[k]),
                 )
                 self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
                 x = tl.unfold(X, k + 1)
-                self.projs_[k], _, _ = tl.partial_svd(x, n_eigenvecs=self.rank)
+                self.projs_[k], _, _ = tl.partial_svd(x, n_eigenvecs=self.rank[k])
             else:
                 raise ValueError("initialize should be one of {identity, random, svd}")
 
         # Calculate means and center
         class_means = []
         X_centered = []
+        class_mean = 0
         for ci, c in enumerate(self.classes_):
             where = y == c
             where = where.reshape((where.shape[0], 1, 1))
@@ -101,9 +100,9 @@ class HODA(BaseEstimator, TransformerMixin):
             X_where = X[y == c]
             mean = tl.mean(X_where, axis=0)
             class_means += [mean]
+            class_mean += mean / n_classes
             X_centered.append(X_where - mean)
 
-        class_mean = tl.mean(class_means, axis=0)
         for ci, c in enumerate(self.classes_):
             class_means[ci] -= class_mean
 
@@ -112,6 +111,11 @@ class HODA(BaseEstimator, TransformerMixin):
         self.objective_ = []
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
+
+        scatter_t = [None] * order
+        for k in range(order):
+            Xk = tl.base.unfold(X, mode=k + 1)
+            scatter_t[k] = Xk @ Xk.conj().T
 
         for self.iter_ in range(self.max_iter):
             if self.verbose:
@@ -168,7 +172,7 @@ class HODA(BaseEstimator, TransformerMixin):
                     # Optimize scatter difference criterion
                     w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
                     scatter_w = v @ tl.diag(w) @ v.conj().T
-                    subset = [shape[k] - self.rank, shape[k] - 1]
+                    subset = [shape[k] - self.rank[k], shape[k] - 1]
                     w, v = scipy.linalg.eigh(
                         scatter_b, scatter_w, subset_by_index=subset
                     )
@@ -197,15 +201,14 @@ class HODA(BaseEstimator, TransformerMixin):
                 elif self.solver == "sr":
                     raise NotImplementedError
                 elif self.solver == "diff-svd":
-                    scatter_w /= np.trace(scatter_w)
-                    scatter_b /= np.trace(scatter_b)
                     # Optimize scatter difference criterion
-                    subset = [shape[k] - self.rank, shape[k] - 1]
-                    # v, w, _ = tl.partial_svd(
-                    #    scatter_b - zeta * scatter_w, n_eigenvecs=self.rank, flip=True
-                    #
-                    v, w, _ = scipy.sparse.linalg.svds(
-                        scatter_b - self.zeta * scatter_w, k=self.rank
+                    phi = tl.trace(scatter_b) / tl.trace(scatter_w)
+                    v, w, _ = tl.partial_svd(
+                        scatter_b - phi * scatter_w, n_eigenvecs=self.rank[k]
+                    )
+                    v, w, _ = tl.partial_svd(
+                        v @ v.conj().T @ scatter_t[k] @ v @ v.conj().T,
+                        n_eigenvecs=self.rank[k],
                     )
                     pass
                 elif self.solver == "ratio-svd":
@@ -239,7 +242,8 @@ class HODA(BaseEstimator, TransformerMixin):
         toep = [0] * n_features
         for f in range(n_features):
             toep[f] = tl.mean(tl.diag(scatter, k=f))
-        toep *= np.linspace(1, 0, len(toep))
+        taper = tl.arange(len(toep), 0, -1) - 1
+        toep = tl.tensor(toep) * taper
         toep = tl.tensor(toep)
         if tl.get_backend() == "numpy":
             cov_toep = scipy.linalg.toeplitz(toep)
