@@ -1,5 +1,6 @@
 import math
 
+import cupy.linalg
 import cupyx.scipy.linalg
 import cupyx.scipy.sparse.linalg
 import ipdb
@@ -27,7 +28,7 @@ class MLSVD(BaseEstimator, TransformerMixin):
         else:
             modes = np.asarray(modes)
 
-        self.factors_ = [np.eye(shape[k]) for k in range(order)]
+        self.factors_ = [tl.eye(shape[k]) for k in range(order)]
         _, factors = tensorly.decomposition.partial_tucker(
             X, modes=modes + 1, rank=self.rank
         )
@@ -54,6 +55,7 @@ class HODA(BaseEstimator, TransformerMixin):
         toeplitz=None,
         solver="ratio-gevd",
         verbose=False,
+        var_thresh=0.95,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -63,31 +65,54 @@ class HODA(BaseEstimator, TransformerMixin):
         self.toeplitz = toeplitz
         self.solver = solver
         self.verbose = verbose
+        self.var_thresh = var_thresh
 
     def fit(self, X, y):
         X = tl.tensor(X)
         self.classes_, class_counts = np.unique(y, return_counts=True)
         n_classes = len(self.classes_)
-        shape = X.shape[1:]
+        n_samples, *shape = X.shape
         order = len(shape)
 
+        # Calculate rank
+        scatter_t = [None] * order
+        for k in range(order):
+            Xk = tl.base.unfold(X, mode=k + 1)
+            scatter_t[k] = Xk @ Xk.conj().T
+
+        self.rank_ = self.rank
+        if self.rank_ is None:
+            self.rank_ = [0] * order
+            for k in range(order):
+                Xk = tl.unfold(X, mode=k + 1)
+                if tl.get_backend() == "cupy":
+                    _, w, _ = cupy.linalg.svd(scatter_t[k])
+                    w = cupy.asnumpy(w)
+                elif tl.get_backend() == "numpy":
+                    _, w, _ = scipy.linalg.svd(scatter_t[k])
+                else:
+                    raise NotImplementedError
+                variance = np.cumsum(w) / np.sum(w)
+                self.rank_[k] = max(np.nonzero(variance > self.var_thresh)[0][0], 2)
         # Initialize projections
         self.projs_ = [None] * order
         for k in range(order):
             if self.initialize == "identity":
-                self.projs_[k] = tl.eye(shape[k], self.rank[k])
+                self.projs_[k] = tl.eye(shape[k], self.rank_[k])
             elif self.initialize == "ones":
-                self.projs_[k] = tl.eye(shape[k], self.rank[k])
+                self.projs_[k] = tl.ones((shape[k], self.rank_[k]))
             elif self.initialize == "random":
                 self.projs_[k] = tl_random.random_tensor(
-                    shape=(shape[k], self.rank[k]),
+                    shape=(shape[k], self.rank_[k]),
                 )
                 self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
                 x = tl.unfold(X, k + 1)
-                self.projs_[k], _, _ = tl.partial_svd(x, n_eigenvecs=self.rank[k])
+                self.projs_[k], _, _ = tl.partial_svd(x, n_eigenvecs=self.rank_[k])
             else:
-                raise ValueError("initialize should be one of {identity, random, svd}")
+                raise ValueError(
+                    "initialize should be one of {identity, ones, random, svd}"
+                )
 
         # Calculate means and center
         class_means = []
@@ -102,7 +127,7 @@ class HODA(BaseEstimator, TransformerMixin):
             class_means += [mean]
             class_mean += mean / n_classes
             X_centered.append(X_where - mean)
-
+        X_centered = tl.concatenate(X_centered, axis=0)
         for ci, c in enumerate(self.classes_):
             class_means[ci] -= class_mean
 
@@ -111,12 +136,6 @@ class HODA(BaseEstimator, TransformerMixin):
         self.objective_ = []
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
-
-        scatter_t = [None] * order
-        for k in range(order):
-            Xk = tl.base.unfold(X, mode=k + 1)
-            scatter_t[k] = Xk @ Xk.conj().T
-
         for self.iter_ in range(self.max_iter):
             if self.verbose:
                 print(f"[{self.iter_}/{self.max_iter}]", end="  ")
@@ -124,24 +143,21 @@ class HODA(BaseEstimator, TransformerMixin):
             update = [0] * order
             for k in range(order):
                 # Calculate whithin class scatter
-                scatter_w = 0
                 modes = range(1, order + 1)
-                for ci, c in enumerate(self.classes_):
-                    X_proj_c = tl.tenalg.multi_mode_dot(
-                        X_centered[ci], self.projs_, modes=modes, skip=k, transpose=True
-                    )
-                    X_proj_c = tl.base.unfold(X_proj_c, mode=k + 1)
-                    scatter_w += X_proj_c @ X_proj_c.conj().T
+                X_proj = tl.tenalg.multi_mode_dot(
+                    X_centered, self.projs_, modes=modes, skip=k, transpose=True
+                )
+                modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                scatter_w = tl.tensordot(X_proj, X_proj, axes=(modes, modes))
                 # Force symmetry
                 scatter_w = (scatter_w + scatter_w.conj().T) / 2
                 # Force toeplitz
                 if self.toeplitz is not None and k in self.toeplitz:
                     scatter_w = self._make_toeplitz(scatter_w)
                 # Shrink
-                shrinkage = self.shrinkage
-                if isinstance(shrinkage, tuple):
-                    shrinkage = shrinkage[k]
-                scatter_w, shrinkage = self._shrink(X.shape[0], scatter_w, shrinkage)
+                scatter_w, shrinkage = self._shrink(
+                    scatter_w, n_samples, self.shrinkage[k]
+                )
                 if self.verbose:
                     print(f"shrinkage={shrinkage:.4f}", end="  ")
                 self.scatter_w_[k] = scatter_w
@@ -170,12 +186,16 @@ class HODA(BaseEstimator, TransformerMixin):
                 """
                 if self.solver == "ratio-gevd":
                     # Optimize scatter difference criterion
-                    w, v = scipy.linalg.eigh(scatter_w, subset_by_value=[0, np.inf])
-                    scatter_w = v @ tl.diag(w) @ v.conj().T
-                    subset = [shape[k] - self.rank[k], shape[k] - 1]
+                    subset = [shape[k] - self.rank_[k], shape[k] - 1]
                     w, v = scipy.linalg.eigh(
                         scatter_b, scatter_w, subset_by_index=subset
                     )
+                if self.solver == "ratio-svd":
+                    v, w, _ = cupy.linalg.svd(
+                        cupy.linalg.pinv(scatter_w) @ scatter_b, full_matrices=False
+                    )
+                    v = v[:, : self.rank_[k]]
+
                 elif self.solver == "ratio-gevd-lanczos":
                     raise NotImplementedError
                 elif self.solver == "ratio-gevd-lobpcg":
@@ -203,14 +223,17 @@ class HODA(BaseEstimator, TransformerMixin):
                 elif self.solver == "diff-svd":
                     # Optimize scatter difference criterion
                     phi = tl.trace(scatter_b) / tl.trace(scatter_w)
-                    v, w, _ = tl.partial_svd(
-                        scatter_b - phi * scatter_w, n_eigenvecs=self.rank[k]
-                    )
-                    v, w, _ = tl.partial_svd(
-                        v @ v.conj().T @ scatter_t[k] @ v @ v.conj().T,
-                        n_eigenvecs=self.rank[k],
-                    )
-                    pass
+                    if tl.get_backend() == "cupy":
+                        v, w, _ = cupy.linalg.svd(
+                            scatter_b - phi * scatter_w, full_matrices=False
+                        )
+                        v = v[:, : self.rank_[k]]
+                    else:
+                        v, w, _ = tl.partial_svd(
+                            scatter_b - phi * scatter_w,
+                            n_eigenvecs=self.rank_[k],
+                        )
+
                 elif self.solver == "ratio-svd":
                     raise NotImplementedError
                 else:
@@ -253,7 +276,7 @@ class HODA(BaseEstimator, TransformerMixin):
             raise NotImplementedError
         return cov_toep
 
-    def _shrink(self, n_epochs, scatter, shrinkage):
+    def _shrink(self, scatter, n_epochs, shrinkage):
         n_features, _ = scatter.shape
         # Shrinkage regularization
         if shrinkage == "oas":
@@ -269,6 +292,9 @@ class HODA(BaseEstimator, TransformerMixin):
             X, self.projs_, modes=range(1, order + 1), transpose=True
         )
         return tl.to_numpy(X_trans)
+
+
+# def ledoit_wolf(emp_cov, n_samples):
 
 
 def oas(emp_cov, n_samples):
