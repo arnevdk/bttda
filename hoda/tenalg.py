@@ -30,7 +30,8 @@ def trunc_svd(A, r=None):
         v, w, _ = tl.partial_svd(A, n_eigenvecs=r)
     else:
         raise NotImplementedError
-
+    v *= tl.sign(w)
+    w *= tl.sign(w)
     return v, w
 
 
@@ -45,6 +46,8 @@ def trunc_gevd(A, B, r=None):
         v = v[:, ::-1]
     else:
         raise NotImplementedError
+    v *= tl.sign(w)
+    w *= tl.sign(w)
     return v, w
 
 

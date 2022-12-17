@@ -62,7 +62,6 @@ class HODA(BaseEstimator, TransformerMixin):
         toeplitz=None,
         solver="ratio_gevd",
         verbose=False,
-        var_thresh=0.95,
         solver_params=None,
     ):
         self.max_iter = max_iter
@@ -73,7 +72,6 @@ class HODA(BaseEstimator, TransformerMixin):
         self.toeplitz = toeplitz
         self.solver = solver
         self.verbose = verbose
-        self.var_thresh = var_thresh
         self.solver_params = solver_params
 
     def fit(self, X, y):
@@ -85,25 +83,15 @@ class HODA(BaseEstimator, TransformerMixin):
 
         # Initialize solver
         if self.solver not in SOLVERS.keys():
-            raise ValueError(f"solver must be one of {SOLVERS.keys}")
+            raise ValueError(f"solver must be one of {list(SOLVERS.keys())}")
         solver_params = self.solver_params
         if solver_params is None:
             solver_params = dict()
 
-        # Calculate rank
-        scatter_t = [None] * order
-        for k in range(order):
-            Xk = tl.base.unfold(X, mode=k + 1)
-            scatter_t[k] = Xk @ Xk.conj().T
-
+        # Initialize rank
         self.rank_ = self.rank
         if self.rank_ is None:
-            self.rank_ = [0] * order
-            for k in range(order):
-                Xk = tl.unfold(X, mode=k + 1)
-                _, w = trunc_svd(scatter_t[k])
-                variance = np.cumsum(w) / np.sum(w)
-                self.rank_[k] = max(np.nonzero(variance > self.var_thresh)[0][0], 2)
+            self.rank_ = shape
 
         # Initialize projections
         self.projs_ = [None] * order
