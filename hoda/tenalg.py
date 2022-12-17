@@ -1,5 +1,6 @@
 try:
     import cupy.linalg
+    import cupyx.scipy.linalg
     import cupyx.scipy.sparse.linalg
 except ImportError:
     pass
@@ -54,3 +55,25 @@ def lobpcg(*args, **kwargs):
         return scipy.sparse.linalg.lobpcg(*args, **kwargs)
     else:
         raise NotImplementedError
+
+
+def toeplitz(a):
+    if tl.get_backend() == "numpy":
+        A = scipy.linalg.toeplitz(a)
+    elif tl.get_backend() == "cupy":
+        A = cupyx.scipy.linalg.toeplitz(a)
+    else:
+        raise NotImplementedError
+    return A
+
+
+def force_toeplitz(A, taper=False):
+    n, _ = A.shape
+    toep = [0] * n
+    for i in range(n):
+        toep[i] = tl.mean(tl.diag(A, k=i))
+    if taper:
+        taper = tl.arange(len(toep), 0, -1) - 1
+        toep = tl.tensor(toep) * taper
+    cov_toep = toeplitz(toep)
+    return cov_toep

@@ -1,19 +1,13 @@
 import math
 
-import cupy.linalg
-import cupyx.scipy.linalg
-import cupyx.scipy.sparse.linalg
-import ipdb
 import numpy as np
-import scipy.linalg
-import scipy.sparse.linalg
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
 from sklearn.base import BaseEstimator, TransformerMixin
 from tensorly import random as tl_random
 
-from hoda.tenalg import lobpcg, pinvh, trunc_gevd, trunc_svd
+from hoda.tenalg import force_toeplitz, lobpcg, pinvh, trunc_gevd, trunc_svd
 
 
 def solve_ratio_svd(scatter_w, scatter_b, r):
@@ -107,13 +101,7 @@ class HODA(BaseEstimator, TransformerMixin):
             self.rank_ = [0] * order
             for k in range(order):
                 Xk = tl.unfold(X, mode=k + 1)
-                if tl.get_backend() == "cupy":
-                    _, w, _ = cupy.linalg.svd(scatter_t[k])
-                    w = cupy.asnumpy(w)
-                elif tl.get_backend() == "numpy":
-                    _, w, _ = scipy.linalg.svd(scatter_t[k])
-                else:
-                    raise NotImplementedError
+                _, w = trunc_svd(scatter_t[k])
                 variance = np.cumsum(w) / np.sum(w)
                 self.rank_[k] = max(np.nonzero(variance > self.var_thresh)[0][0], 2)
 
@@ -131,7 +119,7 @@ class HODA(BaseEstimator, TransformerMixin):
                 self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
             elif self.initialize == "svd":
                 x = tl.unfold(X, k + 1)
-                self.projs_[k], _, _ = tl.partial_svd(x, n_eigenvecs=self.rank_[k])
+                self.projs_[k], _ = trunc_svd(x, self.rank_[k])
             else:
                 raise ValueError(
                     "initialize should be one of {identity, ones, random, svd}"
@@ -176,7 +164,7 @@ class HODA(BaseEstimator, TransformerMixin):
                 scatter_w = (scatter_w + scatter_w.conj().T) / 2
                 # Force toeplitz
                 if self.toeplitz is not None and k in self.toeplitz:
-                    scatter_w = self._make_toeplitz(scatter_w)
+                    scatter_w = force_toeplitz(scatter_w, taper=True)
                 # Shrink
                 scatter_w, shrinkage = self._shrink(
                     scatter_w, n_samples, self.shrinkage[k]
@@ -228,22 +216,6 @@ class HODA(BaseEstimator, TransformerMixin):
                 break
         self.updates_ = tl.tensor(self.updates_)
         return self
-
-    def _make_toeplitz(self, scatter):
-        n_features, _ = scatter.shape
-        toep = [0] * n_features
-        for f in range(n_features):
-            toep[f] = tl.mean(tl.diag(scatter, k=f))
-        taper = tl.arange(len(toep), 0, -1) - 1
-        toep = tl.tensor(toep) * taper
-        toep = tl.tensor(toep)
-        if tl.get_backend() == "numpy":
-            cov_toep = scipy.linalg.toeplitz(toep)
-        elif tl.get_backend() == "cupy":
-            cov_toep = cupyx.scipy.linalg.toeplitz(toep)
-        else:
-            raise NotImplementedError
-        return cov_toep
 
     def _shrink(self, scatter, n_epochs, shrinkage):
         n_features, _ = scatter.shape
