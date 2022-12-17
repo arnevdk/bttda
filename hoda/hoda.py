@@ -13,35 +13,48 @@ import tensorly.tenalg
 from sklearn.base import BaseEstimator, TransformerMixin
 from tensorly import random as tl_random
 
+from hoda.tenalg import lobpcg, pinvh, trunc_gevd, trunc_svd
 
-class MLSVD(BaseEstimator, TransformerMixin):
-    def __init__(self, modes=None, rank=None):
-        self.modes = modes
-        self.rank = rank
 
-    def fit(self, X, y=None):
-        shape = X.shape[1:]
-        order = len(shape)
-        modes = self.modes
-        if modes is None:
-            modes = np.arange(order)
-        else:
-            modes = np.asarray(modes)
+def solve_ratio_svd(scatter_w, scatter_b, r):
+    v, _ = trunc_svd(pinvh(scatter_w) @ scatter_b, r)
+    return v
 
-        self.factors_ = [tl.eye(shape[k]) for k in range(order)]
-        _, factors = tensorly.decomposition.partial_tucker(
-            X, modes=modes + 1, rank=self.rank
-        )
-        for mi, mode in enumerate(modes):
-            self.factors_[mode] = factors[mi]
-        return self
 
-    def transform(self, X, y=None):
-        modes = tuple(range(1, len(X.shape)))
-        Xt = tensorly.tenalg.multi_mode_dot(
-            X, self.factors_, modes=modes, transpose=True
-        )
-        return Xt
+def solve_ratio_gevd(scatter_w, scatter_b, r):
+    v, _ = trunc_gevd(scatter_b, scatter_w, r)
+    return v
+
+
+def solve_ratio_lanczos(scatter_w, scatter_b, r):
+    raise NotImplementedError
+
+
+def solve_ratio_lobpcg(scatter_w, scatter_b, r, init=None, **solver_params):
+    if init is None:
+        init = tl.eye(scatter_w.shape[0])[:, :r]
+    w, v = lobpcg(scatter_b, init, B=scatter_w, largest=True, **solver_params)
+    return v
+
+
+def solve_diff_svd(scatter_w, scatter_b, r, psi=1):
+    phi = tl.trace(scatter_b) / tl.trace(scatter_w)
+    v, w = trunc_svd(scatter_b - psi * phi * scatter_w, r)
+    return v
+
+
+def solve_sr(scatter_w, scatter_b, r):
+    raise NotImplementedError
+
+
+SOLVERS = dict(
+    ratio_svd=solve_ratio_svd,
+    ratio_gevd=solve_ratio_gevd,
+    ratio_lanczos=solve_ratio_lanczos,
+    ratio_lobpcg=solve_ratio_lobpcg,
+    diff_svd=solve_diff_svd,
+    sr=solve_sr,
+)
 
 
 class HODA(BaseEstimator, TransformerMixin):
@@ -50,12 +63,13 @@ class HODA(BaseEstimator, TransformerMixin):
         max_iter=100,
         tol=1e-13,
         rank=None,
-        initialize="ones",
+        initialize="svd",
         shrinkage="oas",
         toeplitz=None,
-        solver="ratio-gevd",
+        solver="ratio_gevd",
         verbose=False,
         var_thresh=0.95,
+        solver_params=None,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -66,6 +80,7 @@ class HODA(BaseEstimator, TransformerMixin):
         self.solver = solver
         self.verbose = verbose
         self.var_thresh = var_thresh
+        self.solver_params = solver_params
 
     def fit(self, X, y):
         X = tl.tensor(X)
@@ -73,6 +88,13 @@ class HODA(BaseEstimator, TransformerMixin):
         n_classes = len(self.classes_)
         n_samples, *shape = X.shape
         order = len(shape)
+
+        # Initialize solver
+        if self.solver not in SOLVERS.keys():
+            raise ValueError(f"solver must be one of {SOLVERS.keys}")
+        solver_params = self.solver_params
+        if solver_params is None:
+            solver_params = dict()
 
         # Calculate rank
         scatter_t = [None] * order
@@ -94,6 +116,7 @@ class HODA(BaseEstimator, TransformerMixin):
                     raise NotImplementedError
                 variance = np.cumsum(w) / np.sum(w)
                 self.rank_[k] = max(np.nonzero(variance > self.var_thresh)[0][0], 2)
+
         # Initialize projections
         self.projs_ = [None] * order
         for k in range(order):
@@ -179,66 +202,12 @@ class HODA(BaseEstimator, TransformerMixin):
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
-                """
-                Multilinear Discriminant Analysis for
-                Higher-Order Tensor Data Classification
-                Qun Li, Member, IEEE and Dan Schonfeld, Fellow, IEE
-                """
-                if self.solver == "ratio-gevd":
-                    # Optimize scatter difference criterion
-                    subset = [shape[k] - self.rank_[k], shape[k] - 1]
-                    w, v = scipy.linalg.eigh(
-                        scatter_b, scatter_w, subset_by_index=subset
-                    )
-                if self.solver == "ratio-svd":
-                    v, w, _ = cupy.linalg.svd(
-                        cupy.linalg.pinv(scatter_w) @ scatter_b, full_matrices=False
-                    )
-                    v = v[:, : self.rank_[k]]
-
-                elif self.solver == "ratio-gevd-lanczos":
-                    raise NotImplementedError
-                elif self.solver == "ratio-gevd-lobpcg":
-                    if tl.get_backend() == "cupy":
-                        w, v = cupyx.scipy.sparse.linalg.lobpcg(
-                            scatter_b,
-                            self.projs_[k],
-                            B=scatter_w,
-                            largest=True,
-                            maxiter=1,
-                        )
-                    elif tl.get_backend() == "numpy":
-                        w, v = scipy.sparse.linalg.lobpcg(
-                            scatter_b,
-                            self.projs_[k],
-                            B=scatter_w,
-                            largest=True,
-                            maxiter=1,
-                        )
-                    else:
-                        raise NotImplementedError
-
-                elif self.solver == "sr":
-                    raise NotImplementedError
-                elif self.solver == "diff-svd":
-                    # Optimize scatter difference criterion
-                    phi = tl.trace(scatter_b) / tl.trace(scatter_w)
-                    if tl.get_backend() == "cupy":
-                        v, w, _ = cupy.linalg.svd(
-                            scatter_b - phi * scatter_w, full_matrices=False
-                        )
-                        v = v[:, : self.rank_[k]]
-                    else:
-                        v, w, _ = tl.partial_svd(
-                            scatter_b - phi * scatter_w,
-                            n_eigenvecs=self.rank_[k],
-                        )
-
-                elif self.solver == "ratio-svd":
-                    raise NotImplementedError
-                else:
-                    raise ValueError
-
+                if self.solver == "ratio-lobpcg":
+                    solver_params["init"] = self.projs_[k]
+                    solver_params["maxiter"] = 1
+                v = SOLVERS[self.solver](
+                    scatter_w, scatter_b, self.rank_[k], **solver_params
+                )
                 # Orthonormalize for stability
                 v, _ = tl.qr(v, mode="reduced")
                 new_projs[k] = v
