@@ -222,8 +222,40 @@ class HODA(BaseEstimator, TransformerMixin):
         )
         return tl.to_numpy(X_trans)
 
+    def inv_transform(self, X, y=None):
+        X = tl.tensor(X)
+        order = len(X.shape) - 1
+        X_trans = tl.tenalg.multi_mode_dot(
+            X, self.projs_, modes=range(1, order + 1), transpose=False
+        )
+        return X_trans
 
-# def ledoit_wolf(emp_cov, n_samples):
+
+class BTTDA(BaseEstimator, TransformerMixin):
+    def __init__(self, block_rank=None, hoda_params=None):
+        self.hoda_params = hoda_params
+        self.block_rank = block_rank
+
+    def fit(self, X, y):
+        X = X.copy()
+        hoda_params = self.hoda_params
+        if hoda_params is None:
+            hoda_params = dict()
+
+        self.blocks_ = []
+        for b in range(self.block_rank):
+            block = HODA(**hoda_params)
+            block.fit(X, y)
+            self.blocks_.append(block)
+            X_approx = block.inv_transform(block.transform(X))
+            X -= X_approx
+
+    def transform(self, X, y=None):
+        Xt = []
+        for block in self.blocks_:
+            Xt.append(block.transform(X, y))
+        Xt = np.stack(Xt, axis=1)
+        return Xt
 
 
 def oas(emp_cov, n_samples):
