@@ -7,13 +7,13 @@ import tensorly.decomposition
 import tensorly.tenalg
 from sklearn.base import BaseEstimator, TransformerMixin
 from tensorly import random as tl_random
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 
 from hoda.tenalg import force_toeplitz, lobpcg, pinvh, trunc_gevd, trunc_svd
 
 
 def solve_ratio_svd(scatter_w, scatter_b, r):
-    v, _ = trunc_svd(pinvh(scatter_w) @ scatter_b, r)
+    v, w = trunc_svd(pinvh(scatter_w) @ scatter_b, r)
     return v
 
 
@@ -93,7 +93,7 @@ class HODA(BaseEstimator, TransformerMixin):
         # Initialize rank
         self.rank_ = self.rank
         if self.rank_ is None:
-            self.rank_ = (max(shape),) * order
+            self.rank_ = shape
 
         # Calculate means and center
         class_means = []
