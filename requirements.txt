@@ -4,3 +4,4 @@ tensorly
 jupyter
 sklearn
 toeplitzlda
+tqdm

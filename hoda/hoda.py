@@ -7,6 +7,7 @@ import tensorly.decomposition
 import tensorly.tenalg
 from sklearn.base import BaseEstimator, TransformerMixin
 from tensorly import random as tl_random
+from tqdm import tqdm
 
 from hoda.tenalg import force_toeplitz, lobpcg, pinvh, trunc_gevd, trunc_svd
 
@@ -92,7 +93,7 @@ class HODA(BaseEstimator, TransformerMixin):
         # Initialize rank
         self.rank_ = self.rank
         if self.rank_ is None:
-            self.rank_ = shape
+            self.rank_ = (max(shape),) * order
 
         # Calculate means and center
         class_means = []
@@ -142,9 +143,10 @@ class HODA(BaseEstimator, TransformerMixin):
         self.objective_ = []
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
-        for self.iter_ in range(self.max_iter):
-            if self.verbose:
-                print(f"[{self.iter_}/{self.max_iter}]", end="  ")
+        iterator = range(self.max_iter)
+        if self.verbose:
+            iterator = tqdm(iterator)
+        for self.iter_ in iterator:
             new_projs = [None] * order
             update = [0] * order
             for k in range(order):
@@ -164,8 +166,6 @@ class HODA(BaseEstimator, TransformerMixin):
                 scatter_w, shrinkage = self._shrink(
                     scatter_w, n_samples, self.shrinkage[k]
                 )
-                if self.verbose:
-                    print(f"shrinkage={shrinkage:.4f}", end="  ")
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
@@ -205,9 +205,9 @@ class HODA(BaseEstimator, TransformerMixin):
 
             self.updates_.append(update)
             self.projs_ = new_projs
-            if self.verbose:
-                print(f"step={(sum(update)/order):.4e}")
             if break_flag:
+                if self.verbose:
+                    print(f"Tolerance reached")
                 break
         self.updates_ = tl.tensor(self.updates_)
         return self
@@ -239,9 +239,10 @@ class HODA(BaseEstimator, TransformerMixin):
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
-    def __init__(self, block_rank=None, hoda_params=None):
+    def __init__(self, block_rank=None, hoda_params=None, verbose=False):
         self.hoda_params = hoda_params
         self.block_rank = block_rank
+        self.verbose = verbose
 
     def fit(self, X, y):
         X = X.copy()
@@ -251,6 +252,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
         self.blocks_ = []
         for b in range(self.block_rank):
+            if self.verbose:
+                print(f"Fitting block {b+1}/{self.block_rank} ...")
             block = HODA(**hoda_params)
             block.fit(X, y)
             self.blocks_.append(block)
@@ -273,6 +276,8 @@ def oas(emp_cov, n_samples):
     alpha = np.mean(emp_cov**2)
     num = alpha + mu**2
     den = (n_samples + 1.0) * (alpha - (mu**2) / n_features)
-
-    shrinkage = np.real(num / den)
+    if den == 0:
+        shrinkage = 1
+    else:
+        shrinkage = np.real(num / den)
     return max(min(shrinkage, 1), 0)
