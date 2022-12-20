@@ -1,5 +1,6 @@
 import math
 
+import ipdb
 import numpy as np
 import tensorly as tl
 import tensorly.decomposition
@@ -57,7 +58,7 @@ class HODA(BaseEstimator, TransformerMixin):
         max_iter=100,
         tol=1e-13,
         rank=None,
-        initialize="svd",
+        init="mlsvd",
         shrinkage="oas",
         toeplitz=None,
         solver="ratio_gevd",
@@ -67,7 +68,7 @@ class HODA(BaseEstimator, TransformerMixin):
         self.max_iter = max_iter
         self.tol = tol
         self.rank = rank
-        self.initialize = initialize
+        self.init = init
         self.shrinkage = shrinkage
         self.toeplitz = toeplitz
         self.solver = solver
@@ -93,26 +94,6 @@ class HODA(BaseEstimator, TransformerMixin):
         if self.rank_ is None:
             self.rank_ = shape
 
-        # Initialize projections
-        self.projs_ = [None] * order
-        for k in range(order):
-            if self.initialize == "identity":
-                self.projs_[k] = tl.eye(shape[k], self.rank_[k])
-            elif self.initialize == "ones":
-                self.projs_[k] = tl.ones((shape[k], self.rank_[k]))
-            elif self.initialize == "random":
-                self.projs_[k] = tl_random.random_tensor(
-                    shape=(shape[k], self.rank_[k]),
-                )
-                self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
-            elif self.initialize == "svd":
-                x = tl.unfold(X, k + 1)
-                self.projs_[k], _ = trunc_svd(x, self.rank_[k])
-            else:
-                raise ValueError(
-                    "initialize should be one of {identity, ones, random, svd}"
-                )
-
         # Calculate means and center
         class_means = []
         X_centered = []
@@ -129,6 +110,32 @@ class HODA(BaseEstimator, TransformerMixin):
         X_centered = tl.concatenate(X_centered, axis=0)
         for ci, c in enumerate(self.classes_):
             class_means[ci] -= class_mean
+
+        # Initialize projections
+        self.projs_ = [None] * order
+        if self.init == "mlsvd":
+            modes = tuple(range(1, order + 1))
+            _, self.projs_ = tl.decomposition.partial_tucker(
+                X_centered, modes, rank=self.rank_
+            )
+        else:
+            for k in range(order):
+                if self.init == "identity":
+                    self.projs_[k] = tl.eye(shape[k], self.rank_[k])
+                elif self.init == "ones":
+                    self.projs_[k] = tl.ones((shape[k], self.rank_[k]))
+                elif self.init == "random":
+                    self.projs_[k] = tl_random.random_tensor(
+                        shape=(shape[k], self.rank_[k]),
+                    )
+                    self.projs_[k], _ = tl.qr(self.projs_[k], mode="reduced")
+                elif self.init == "svd":
+                    x = tl.unfold(X, k + 1)
+                    self.projs_[k], _ = trunc_svd(x, self.rank_[k])
+                else:
+                    raise ValueError(
+                        "init should be one of {identity, ones, random, svd}"
+                    )
 
         # Find projections
         self.updates_ = []
