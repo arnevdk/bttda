@@ -9,17 +9,18 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
-from hoda.tenalg import force_toeplitz, lobpcg, pinvh, trunc_gevd, trunc_svd
+from hoda.tenalg import (det, force_toeplitz, lobpcg, pinvh, trunc_gevd,
+                         trunc_svd)
 
 
 def solve_ratio_svd(scatter_w, scatter_b, r):
     v, w = trunc_svd(pinvh(scatter_w) @ scatter_b, r)
-    return v
+    return v, w
 
 
 def solve_ratio_gevd(scatter_w, scatter_b, r):
-    v, _ = trunc_gevd(scatter_b, scatter_w, r)
-    return v
+    v, w = trunc_gevd(scatter_b, scatter_w, r)
+    return v, w
 
 
 def solve_ratio_lanczos(scatter_w, scatter_b, r):
@@ -30,13 +31,13 @@ def solve_ratio_lobpcg(scatter_w, scatter_b, r, init=None, **solver_params):
     if init is None:
         init = tl.eye(scatter_w.shape[0])[:, :r]
     w, v = lobpcg(scatter_b, init, B=scatter_w, largest=True, **solver_params)
-    return v
+    return v, w
 
 
 def solve_diff_svd(scatter_w, scatter_b, r, psi=1):
     phi = tl.trace(scatter_b) / tl.trace(scatter_w)
     v, w = trunc_svd(scatter_b - psi * phi * scatter_w, r)
-    return v
+    return v, w
 
 
 def solve_sr(scatter_w, scatter_b, r):
@@ -65,6 +66,8 @@ class HODA(BaseEstimator, TransformerMixin):
         solver="ratio_gevd",
         verbose=False,
         solver_params=None,
+        fisher_thresh=0.05,
+        keep_train_score=False,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -75,6 +78,8 @@ class HODA(BaseEstimator, TransformerMixin):
         self.solver = solver
         self.verbose = verbose
         self.solver_params = solver_params
+        self.fisher_thresh = fisher_thresh
+        self.keep_train_score = keep_train_score
 
     def fit(self, X, y):
         X = tl.tensor(X)
@@ -90,11 +95,6 @@ class HODA(BaseEstimator, TransformerMixin):
         if solver_params is None:
             solver_params = dict()
 
-        # Initialize rank
-        self.rank_ = self.rank
-        if self.rank_ is None:
-            self.rank_ = shape
-
         # Calculate means and center
         class_means = []
         X_centered = []
@@ -102,7 +102,6 @@ class HODA(BaseEstimator, TransformerMixin):
         for ci, c in enumerate(self.classes_):
             where = y == c
             where = where.reshape((where.shape[0], 1, 1))
-            # mean = tl.mean(X_proj, axis=0, where=where)
             X_where = X[y == c]
             mean = tl.mean(X_where, axis=0)
             class_means += [mean]
@@ -111,6 +110,10 @@ class HODA(BaseEstimator, TransformerMixin):
         X_centered = tl.concatenate(X_centered, axis=0)
         for ci, c in enumerate(self.classes_):
             class_means[ci] -= class_mean
+
+        self.rank_ = self.rank
+        if self.rank_ is None:
+            self.rank_ = shape
 
         # Initialize projections
         self.projs_ = [None] * order
@@ -139,16 +142,16 @@ class HODA(BaseEstimator, TransformerMixin):
                     )
 
         # Find projections
-        self.updates_ = []
-        self.objective_ = []
+        self.train_score_ = tl.zeros(self.max_iter)
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
+        self.feature_mask_ = tl.ones(self.rank_, dtype=int)
+
         iterator = range(self.max_iter)
         if self.verbose:
             iterator = tqdm(iterator)
         for self.iter_ in iterator:
             new_projs = [None] * order
-            update = [0] * order
             for k in range(order):
                 # Calculate whithin class scatter
                 modes = range(1, order + 1)
@@ -163,9 +166,7 @@ class HODA(BaseEstimator, TransformerMixin):
                 if self.toeplitz is not None and k in self.toeplitz:
                     scatter_w = force_toeplitz(scatter_w, taper=True)
                 # Shrink
-                scatter_w, shrinkage = self._shrink(
-                    scatter_w, n_samples, self.shrinkage[k]
-                )
+                scatter_w, shrinkage = shrink(scatter_w, n_samples, self.shrinkage[k])
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
@@ -188,54 +189,91 @@ class HODA(BaseEstimator, TransformerMixin):
                 if self.solver == "ratio-lobpcg":
                     solver_params["init"] = self.projs_[k]
                     solver_params["maxiter"] = 1
-                v = SOLVERS[self.solver](
+                v, w = SOLVERS[self.solver](
                     scatter_w, scatter_b, self.rank_[k], **solver_params
                 )
                 # Orthonormalize for stability
                 v, _ = tl.qr(v, mode="reduced")
                 new_projs[k] = v
 
-            # Stopping criterion
-            break_flag = True
-            for k in range(order):
-                tol = self.tol * math.prod(self.projs_[k].shape)
-                update[k] = tl.norm(new_projs[k] - self.projs_[k])
-                if not update[k] < tol:
-                    break_flag = False
-
-            self.updates_.append(update)
             self.projs_ = new_projs
-            if break_flag:
-                if self.verbose:
-                    print(f"Tolerance reached")
-                break
-        self.updates_ = tl.tensor(self.updates_)
+
+            # Calculate train score
+            if self.keep_train_score:
+                self.train_score_[self.iter_] = self.score(X, y)
+
+        # Calculate feature mask
+        # feature_score = self.feature_score(X, y)
+        # self.feature_mask_[feature_score < self.fisher_thresh] = 0
+
+        if self.verbose:
+            print(f"Fit tucker model of rank {self.rank_}")
         return self
 
-    def _shrink(self, scatter, n_epochs, shrinkage):
-        n_features, _ = scatter.shape
-        # Shrinkage regularization
-        if shrinkage == "oas":
-            shrinkage = oas(scatter, n_epochs)
-        mu = tl.sum(tl.diag(scatter)) / n_features
-        scatter = (1 - shrinkage) * scatter + shrinkage * mu * tl.eye(n_features)
-        return scatter, shrinkage
+    def score(self, X, y):
+        n_classes = len(self.classes_)
+        _, class_counts = np.unique(y, return_counts=True)
 
-    def transform(self, X, y=None):
+        core = self.core(X, y)
+        n_samples, *core_shape = core.shape
+        class_means = tl.zeros((n_classes, *core_shape))
+        for ci, c in enumerate(self.classes_):
+            class_means[ci] = tl.mean(core[y == c], axis=0)
+            core[y == c] = core[y == c] - class_means[ci]
+        class_means = tl.stack(class_means)
+        class_mean = tl.mean(class_means, axis=0)
+
+        scatter_b = 0
+        for ci, c in enumerate(self.classes_):
+            scatter_b += (
+                class_counts[ci] * tl.norm(class_means[ci] - class_mean, order=2) ** 2
+            )
+        scatter_w = tl.norm(core, order=2) ** 2
+        return scatter_b / scatter_w
+
+    def feature_score(self, X, y):
+        n_classes = len(self.classes_)
+        _, class_counts = np.unique(y, return_counts=True)
+
+        core = self.core(X, y)
+        core_flat = tl.unfold(core, 0)
+        n_features = core_flat.shape[-1]
+        fisher_score = tl.zeros(self.rank_)
+        for f in range(n_features):
+            g = core_flat[:, f]
+            class_means = tl.zeros(n_classes)
+            for ci, c in enumerate(self.classes_):
+                class_means[ci] = tl.mean(g[y == c])
+                g[y == c] = g[y == c] - class_means[ci]
+            class_mean = tl.mean(tl.tensor(class_means))
+            var_b = 0
+            for ci, c in enumerate(self.classes_):
+                var_b += class_counts[ci] * (class_means[ci] - class_mean) ** 2
+            var_w = tl.sum(g**2)
+            idx = np.unravel_index(f, self.rank_)
+            fisher_score[*idx] = var_b / var_w
+        return fisher_score
+
+    def core(self, X, y=None):
         X = tl.tensor(X)
         order = len(X.shape) - 1
-        X_trans = tl.tenalg.multi_mode_dot(
+        Xt = tl.tenalg.multi_mode_dot(
             X, self.projs_, modes=range(1, order + 1), transpose=True
         )
-        return tl.to_numpy(X_trans)
+        Xt *= self.feature_mask_
+        return Xt
 
-    def inv_transform(self, X, y=None):
-        X = tl.tensor(X)
-        order = len(X.shape) - 1
-        X_trans = tl.tenalg.multi_mode_dot(
-            X, self.projs_, modes=range(1, order + 1), transpose=False
+    def transform(self, X, y=None):
+        Xt = self.core(X, y)
+        return tl.to_numpy(Xt)
+
+    def inv_transform(self, Xt, y=None):
+        Xt = tl.tensor(Xt)
+        order = len(Xt.shape) - 1
+        X = tl.tenalg.multi_mode_dot(
+            Xt, self.projs_, modes=range(1, order + 1), transpose=False
         )
-        return X_trans
+        return X
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
@@ -253,12 +291,14 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.blocks_ = []
         for b in range(self.block_rank):
             if self.verbose:
-                print(f"Fitting block {b+1}/{self.block_rank} ...")
+                print(f"Fitting block {b+1}/{self.block_rank}...")
             block = HODA(**hoda_params)
             block.fit(X, y)
             self.blocks_.append(block)
             X_approx = block.inv_transform(block.transform(X))
             X -= X_approx
+            if self.verbose:
+                print()
 
     def transform(self, X, y=None):
         Xt = []
@@ -268,16 +308,26 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return Xt
 
 
+def shrink(cov, n_samples, method):
+    n_features, _ = cov.shape
+    # Shrinkage regularization
+    if method == "oas":
+        shrinkage = oas(cov, n_samples)
+    mu = tl.sum(tl.diag(cov)) / n_features
+    cov = (1 - shrinkage) * cov + shrinkage * mu * tl.eye(n_features)
+    return cov, shrinkage
+
+
 def oas(emp_cov, n_samples):
     n_features = emp_cov.shape[0]
-    mu = np.trace(emp_cov) / n_features
+    mu = tl.trace(emp_cov) / n_features
 
     # formula from Chen et al.'s **implementation**
-    alpha = np.mean(emp_cov**2)
+    alpha = tl.mean(emp_cov**2)
     num = alpha + mu**2
     den = (n_samples + 1.0) * (alpha - (mu**2) / n_features)
     if den == 0:
         shrinkage = 1
     else:
-        shrinkage = np.real(num / den)
+        shrinkage = num / den
     return max(min(shrinkage, 1), 0)

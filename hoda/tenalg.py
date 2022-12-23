@@ -80,3 +80,12 @@ def force_toeplitz(A, taper=False):
         toep = tl.tensor(toep) * taper
     cov_toep = toeplitz(toep)
     return cov_toep
+
+
+def det(A):
+    if tl.get_backend() == "numpy":
+        return scipy.linalg.det(A)
+    elif tl.get_backend() == "cupy":
+        return cupy.linalg.det(A)
+    else:
+        raise NotImplementedError
