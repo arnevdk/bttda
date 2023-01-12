@@ -35,7 +35,7 @@ def trunc_svd(A, r=None):
     return v, w
 
 
-def trunc_gevd(A, B, r=None):
+def trunc_gevd(A, B=None, r=None):
     n = A.shape[0]
     if r is None:
         r = n
