@@ -23,16 +23,15 @@ def trunc_svd(A, r=None):
     if r is None:
         r = n
     if tl.get_backend() == "cupy":
-        v, w, _ = cupy.linalg.svd(A, full_matrices=False)
-        v = v[:, :r]
+        vl, w, vr = cupy.linalg.svd(A, full_matrices=False)
+        vl = vl[:, :r]
         w = w[:r]
+        vr = vr[:, :r]
     elif tl.get_backend() == "numpy":
-        v, w, _ = tl.partial_svd(A, n_eigenvecs=r)
+        vl, w, vr = tl.partial_svd(A, n_eigenvecs=r)
     else:
         raise NotImplementedError
-    v *= tl.sign(w)
-    w *= tl.sign(w)
-    return v, w
+    return vl, w, vr
 
 
 def trunc_gevd(A, B=None, r=None):
@@ -46,8 +45,6 @@ def trunc_gevd(A, B=None, r=None):
         v = v[:, ::-1]
     else:
         raise NotImplementedError
-    v *= tl.sign(w)
-    w *= tl.sign(w)
     return v, w
 
 
@@ -72,12 +69,14 @@ def toeplitz(a):
 
 def force_toeplitz(A, taper=False):
     n, _ = A.shape
-    toep = [0] * n
+    toep = tl.zeros(n)
     for i in range(n):
-        toep[i] = tl.mean(tl.diag(A, k=i))
+        diag_i = tl.diag(A, k=i)
+        mean_diag_i = tl.mean(diag_i)
+        toep[i] = mean_diag_i
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
-        toep = tl.tensor(toep) * taper
+        toep = toep * taper
     cov_toep = toeplitz(toep)
     return cov_toep
 
