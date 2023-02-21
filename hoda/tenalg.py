@@ -5,6 +5,7 @@ try:
 except ImportError:
     pass
 
+import numpy as np
 import scipy.linalg
 import tensorly as tl
 
@@ -44,6 +45,18 @@ def trunc_gevd(A, B=None, r=None):
         w = w[::-1]
         v = v[:, ::-1]
     else:
+        raise NotImplementedError
+    return v, w
+
+
+def trunc_eigh(A, r=None):
+    if tl.get_backend() == "cupy":
+        w, v = cupy.linalg.eigh(A)
+        idc = np.argsort(-tl.abs(w))[:r]
+        w = w[idc]
+        v = v[:, idc]
+    else:
+        # TODO
         raise NotImplementedError
     return v, w
 
