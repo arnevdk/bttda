@@ -287,19 +287,18 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.scalings_ = new_scalings
 
             mode_update = tl.zeros(order)
-            # for k in range(order):
-            #    last_r = last_scalings[k].shape[1]
-            #    new_r = new_scalings[k].shape[1]
-            #    max_r = max(last_r, new_r)
-            #    last_proj_ext = tl.zeros((shape[k], max_r))
-            #    last_proj_ext[:, :last_r] = last_scalings[k]
-            #    new_proj_ext = tl.zeros((shape[k], max_r))
-            #    new_proj_ext[:, :new_r] = new_scalings[k]
-            #    mode_update[k] = tl.norm(
-            #        new_proj_ext.T @ last_proj_ext - tl.eye(max_r), order=2
-            #    )
-            # update = tl.sum(mode_update)
-            update = 0
+            for k in range(order):
+                last_r = last_scalings[k].shape[1]
+                new_r = new_scalings[k].shape[1]
+                max_r = max(last_r, new_r)
+                last_proj_ext = tl.zeros((shape[k], max_r))
+                last_proj_ext[:, :last_r] = last_scalings[k]
+                new_proj_ext = tl.zeros((shape[k], max_r))
+                new_proj_ext[:, :new_r] = new_scalings[k]
+                mode_update[k] = tl.norm(
+                    new_proj_ext.T @ last_proj_ext - tl.eye(max_r), order=2
+                )
+            update = tl.sum(mode_update)
 
             # Store training information
             if self.keep_train_info:
