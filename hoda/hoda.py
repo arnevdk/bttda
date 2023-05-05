@@ -1,21 +1,24 @@
 import cupy
 import ipdb
 import numpy as np
+import scipy.linalg
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
+from sklearn.covariance import ledoit_wolf, oas, shrunk_covariance
+from sklearn.linear_model import ElasticNet
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
-from hoda.tenalg import (det, force_toeplitz, lobpcg, pinvh, trunc_gevd,
-                         trunc_svd)
+from hoda.tenalg import (det, force_toeplitz, lobpcg, pinvh, trunc_eigh,
+                         trunc_gevd)
 
 
 def solve_ratio_svd(scatter_b, scatter_t, v, r):
-    v, w, _ = trunc_svd(pinvh(scatter_t) @ scatter_b, r)
+    v, w, _ = tensorly.tenalg.svd_interface(pinvh(scatter_t) @ scatter_b, n_eigenvecs=r)
     o = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    return v, w, o
+    return v, w, np.real(o)
 
 
 def solve_ratio_gevd(scatter_b, scatter_t, v, r):
@@ -35,22 +38,26 @@ def solve_ratio_lobpcg(scatter_b, scatter_t, v, r, **solver_params):
 
 def solve_diff(scatter_b, scatter_t, v, r, psi=1):
     phi = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    w, v = cupy.linalg.eigh(scatter_b - psi * phi * scatter_t)
-    idc = np.argsort(-w)[:r]
-    w = w[idc]
-    v = v[:, idc]
-    o = tl.trace(v.T @ (scatter_b - psi * phi * scatter_t) @ v)
+    v, w = trunc_eigh(scatter_b - psi * phi * scatter_t, r, largest=True)
+    o = tl.sum(w)
+    return v, w, o
+
+
+def solve_lfl(scatter_b, scatter_t, v, r, psi=1):
+    phi = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
+    v, w = trunc_gevd(scatter_b - psi * phi * scatter_t, scatter_t, r)
+    o = tl.sum(w)
     return v, w, o
 
 
 def solve_od(scatter_b, scatter_t, v, r):
+
     s = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    w, v = cupy.linalg.eigh(s**2 * scatter_t - 2 * s * scatter_b)
-    idc = np.argsort(w)[:r]
+    w, v = cupy.linalg.eigh(-(s**2 * scatter_t - 2 * s * scatter_b))
+    idc = np.argsort(-w)[:r]
     w = w[idc]
     v = v[:, idc]
     o = tl.sum(w)
-    o = -o
     return v, w, o
 
 
@@ -66,17 +73,18 @@ SOLVERS = dict(
     diff=solve_diff,
     sr=solve_sr,
     od=solve_od,
+    lfl=solve_lfl,
 )
 
 
 def fisher_score(X, y):
-    X = tl.tensor(X)
+    X = tl.tensor(X, dtype=X.dtype)
     n_samples, *shape = X.shape
     classes, class_counts = np.unique(y, return_counts=True)
     n_classes = len(classes)
 
     # Calculate class means, overall class mean and center data
-    means = tl.zeros((n_classes, *shape))
+    means = tl.zeros((n_classes, *shape), dtype=X.dtype)
     for ci, c in enumerate(classes):
         means[ci] = tl.mean(X[y == c], axis=0)
         X[y == c] -= means[ci][np.newaxis]
@@ -109,6 +117,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         solver_params=None,
         keep_train_info=False,
         priors=None,
+        taper=False,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -121,9 +130,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.solver_params = solver_params
         self.keep_train_info = keep_train_info
         self.priors = priors
+        self.taper = taper
 
     def fit(self, X, y):
-        X = tl.tensor(X)
+        X = tl.tensor(X, dtype=X.dtype)
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
         n_classes = len(self.classes_)
@@ -144,13 +154,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             solver_params = dict()
 
         # Calculate mode total scatter
-        scatter_t_orig = [None] * order
-        for k in range(order):
-            modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-            scatter_t_orig[k] = tl.tensordot(X, X, axes=(modes, modes))
+        # scatter_t_orig = [None] * order
+        # for k in range(order):
+        #    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+        #    scatter_t_orig[k] = tl.tensordot(X, X, axes=(modes, modes))
 
         # Calculate means and center
-        means = tl.zeros((n_classes, *shape))
+        means = tl.zeros((n_classes, *shape), dtype=X.dtype)
         X_centered = []
         class_mean = 0
         for ci, c in enumerate(self.classes_):
@@ -166,82 +176,104 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             means[ci] -= class_mean
             # TODO: rename to means_centered
 
-        # Initialize rank
         if self.rank is None:
             self.rank_ = shape.copy()
-            for k in range(order):
-                scatter_w = self._scatter_w(X_centered, k)
-                scatter_b = self._scatter_b(means, class_counts, k)
-                max_o = -np.inf
-                for r in range(1, shape[k] + 1):
-                    # TODO: replace with decent init
-                    v, _, _ = trunc_svd(tl.unfold(X_centered, k + 1), r)
-                    last_o = None
-                    for i in range(100):
-                        v, _, o = solve_od(scatter_b, scatter_w, v, r)
-                        if o == last_o:
-                            break
-                        last_o = o
-                    if o <= max_o:
-                        break
-                    max_o = o
-                self.rank_[k] = r - 1
         else:
             self.rank_ = self.rank
 
         # Initialize projections
+        if self.verbose:
+            print("Initializing factors...")
         self.scalings_ = [None] * order
         self.weightings_ = [None] * order
         if self.init == "mlsvd":
             modes = tuple(range(1, order + 1))
-            _, self.scalings_ = tl.decomposition.partial_tucker(
-                X_centered, modes, rank=self.rank_
+            (_, self.scalings_), _ = tl.decomposition.partial_tucker(
+                X_centered,
+                rank=self.rank_,
+                modes=modes,
             )
         else:
             for k in range(order):
                 if self.init == "identity":
-                    self.scalings_[k] = tl.eye(shape[k], self.rank_[k])
+                    self.scalings_[k] = tl.eye(shape[k], self.rank_[k], dtype=X.dtype)
                 elif self.init == "ones":
-                    self.scalings_[k] = tl.ones((shape[k], self.rank_[k]))
+                    self.scalings_[k] = tl.ones(
+                        (shape[k], self.rank_[k]), dtype=X.dtype
+                    )
                 elif self.init == "random":
                     self.scalings_[k] = tl_random.random_tensor(
                         shape=(shape[k], self.rank_[k]),
                     )
                     self.scalings_[k], _ = tl.qr(self.scalings_[k], mode="reduced")
+                elif self.init == "eye":
+                    self.scalings_[k] = tl.eye(shape[k], dtype=X.dtype)[
+                        :, : self.rank_[k]
+                    ]
                 elif self.init == "svd":
-                    x = tl.unfold(X, k + 1)
-                    self.scalings_[k], _ = trunc_svd(x, self.rank_[k])
+                    Xk = tl.unfold(X, k + 1)
+                    self.scalings_[k], _, _ = tensorly.tenalg.svd_interface(
+                        Xk, n_eigenvecs=self.rank_[k]
+                    )
                 else:
                     raise ValueError(
                         "init should be one of {identity, ones, random, svd}"
                     )
 
+        # Initialize rank
+        if self.rank is None:
+            for k in range(order):
+                modes = range(1, order + 1)
+                X_proj = tl.tenalg.multi_mode_dot(
+                    X_centered,
+                    self.scalings_,
+                    modes=modes,
+                    skip=k,
+                    transpose=True,
+                )
+                scatter_w = self._scatter_w(X_proj, k)
+
+                # Calculate between class scatter
+                means_proj = tl.tenalg.multi_mode_dot(
+                    means, self.scalings_, modes=modes, skip=k, transpose=True
+                )
+                scatter_b = self._scatter_b(means_proj, class_counts, k)
+
+                # Solve
+                scatter_t = scatter_w + scatter_b
+                u, w, obj = SOLVERS[self.solver](
+                    scatter_b,
+                    scatter_t,
+                    self.scalings_[k],
+                    self.rank_[k],
+                    **solver_params,
+                )
+                u = u[:, w > 0]
+                self.rank_[k] = u.shape[1]
+                self.scalings_[k] = self.scalings_[k][:, : self.rank_[k]]
+
         # Store initial training information
         if self.keep_train_info:
             core = self._transform(X, y)
             f_score = fisher_score(core, y)
-            mse = tl.mean((self._inv_transform(core) - X) ** 2)
+            mse = np.real(tl.mean((self._inv_transform(core) - X) ** 2))
             # TODO: mode f score
             self.train_info_ = dict(
-                objective=[[] for _ in range(order)],
-                f_score=[float(f_score)],
-                mode_f_score=[[] for _ in range(order)],
-                mse=[float(mse)],
-                update=[],
+                mode_objective=[[] for _ in range(order)],
                 mode_update=[[] for _ in range(order)],
+                f_score=[float(f_score)],
+                mse=[float(mse)],
             )
 
         # Iteratively find projections
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
-        last_scalings = self.scalings_
         iterator = range(self.max_iter)
         if self.verbose:
             iterator = tqdm(iterator)
         for self.iter_ in iterator:
-            new_scalings = [None] * order
+            update = 0
             for k in range(order):
-                # Calculate whithin class scatter
                 modes = range(1, order + 1)
                 X_proj = tl.tenalg.multi_mode_dot(
                     X_centered,
@@ -261,89 +293,126 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
-                scatter_t = scatter_b + scatter_w
-                v, w, obj = SOLVERS[self.solver](
+                scatter_t = scatter_w + scatter_b
+                u, w, obj = SOLVERS[self.solver](
                     scatter_b,
                     scatter_w,
                     self.scalings_[k],
                     self.rank_[k],
                     **solver_params,
                 )
+                u, w, _ = tensorly.tenalg.svd_interface(
+                    u @ u.T @ scatter_t @ u @ u.T,
+                    n_eigenvecs=self.rank_[k],
+                    flip_sign=True,
+                )
 
+                u, _ = tl.qr(u, mode="reduced")
+
+                mode_update = tl.norm(u - self.scalings_[k], order=2) / (
+                    shape[k] * self.rank_[k] * (tl.norm(X) / np.prod(X.shape))
+                )
+                update += mode_update
+                # Store mode training information
                 if self.keep_train_info:
-                    self.train_info_["objective"][k].append(float(obj))
-                self.rank_[k] = v.shape[1]
+                    self.train_info_["mode_objective"][k].append(float(obj))
+                    self.train_info_["mode_update"][k].append(float(mode_update))
 
-                # v, w, _ = trunc_svd(
-                #    v @ v.T @ scatter_t_orig[k] @ v @ v.T, self.rank_[k]
-                # )
-                v, _ = tl.qr(v, mode="reduced")
-                new_scalings[k] = v
+                # Elastic net
+                # u = self.scalings_[k]
+                # mu = tl.trace(u.T @ scatter_w @ u) / tl.trace(u.T @ scatter_b @ u)
+                # Phi, l, _ = trunc_svd(scatter_w - mu * scatter_b, shape[k])
+                # Xk = Phi @ tl.diag(tl.sign(l) * tl.sqrt(tl.abs(l))) @ Phi.T
+
+                # A = tl.ones((shape[k], shape[k]))
+                # en = ElasticNet(alpha=1.0, l1_ratio=1, fit_intercept=False)
+                # for i_en in range(100):
+                #    en.fit(cupy.asnumpy(A @ Xk.T), cupy.asnumpy(Phi.T @ Xk.T))
+                #    u = tl.tensor(en.coef_)
+                #    u, w, v = trunc_svd(Phi.T @ Xk @ Xk.T @ u, shape[k])
+                #    u = u[:, self.rank_[k] :]
+                #    v = v[:, self.rank_[k] :]
+                #    w = w[self.rank_[k] :]
+                #    A = u @ v.T
+
+                # Sparse core
+
+                # core = tl.tenalg.mode_dot(X_proj, u.T, k + 1)
+                # samples = []
+                # for c in self.classes_:
+                #    samples.append(cupy.asnumpy(core[y == c]))
+                # F, p = scipy.stats.f_oneway(*samples, axis=0)
+                # core[:, p > 1] = 0
+                # core_flat = cupy.asnumpy(tl.unfold(core, k + 1))
+                # core_flat = core_flat[~np.all(core_flat == 0, axis=1), :]
+                # X_proj_flat = cupy.asnumpy(tl.unfold(X_proj, k + 1))
+                # u = scipy.linalg.lstsq(core_flat.T, X_proj_flat.T)[0].T
+                # self.rank_[k] = u.shape[1]
+                # u = tl.tensor(u)
+
+                self.scalings_[k] = u
                 self.weightings_[k] = w
 
-            self.scalings_ = new_scalings
-
-            # Calculate update
-            self.scalings_ = new_scalings
-
-            mode_update = tl.zeros(order)
-            for k in range(order):
-                last_r = last_scalings[k].shape[1]
-                new_r = new_scalings[k].shape[1]
-                max_r = max(last_r, new_r)
-                last_proj_ext = tl.zeros((shape[k], max_r))
-                last_proj_ext[:, :last_r] = last_scalings[k]
-                new_proj_ext = tl.zeros((shape[k], max_r))
-                new_proj_ext[:, :new_r] = new_scalings[k]
-                mode_update[k] = tl.norm(
-                    new_proj_ext.T @ last_proj_ext - tl.eye(max_r), order=2
-                )
-            update = tl.sum(mode_update)
-
-            # Store training information
+            # Store iteration training information
             if self.keep_train_info:
                 core = self._transform(X, y)
                 f_score = fisher_score(core, y)
-                mse = tl.mean((self._inv_transform(core) - X) ** 2)
+                mse = np.abs(tl.mean((self._inv_transform(core) - X) ** 2))
                 self.train_info_["f_score"].append(float(f_score))
                 self.train_info_["mse"].append(float(mse))
-                self.train_info_["update"].append(float(update))
-                for k in range(order):
-                    self.train_info_["mode_update"][k].append(float(mode_update[k]))
 
             # Check convergence
             if update < self.tol:
                 break
-            last_scalings = self.scalings_
         if self.verbose:
             print(f"Fit tucker model of rank {self.rank_}")
+
         return self
 
     def _scatter_w(self, X, k):
-        order = len(X.shape[1:])
-        n_samples = X.shape[0]
-        # Calculate scatter
-        modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-        scatter_w = tl.tensordot(X, X, axes=(modes, modes))
-        scatter_w, shrinkage = shrink(scatter_w, n_samples, self.shrinkage[k])
+        # Calculate whithin class scatter with shrinkage regularization
+        X = tl.unfold(X, k + 1)
+        # if self.shrinkage is not None:
+        #    if self.shrinkage[k] == "lw":
+        #        gamma = None
+        #    else:
+        #        gamma = self.shrinkage[k]
+        #    scatter_w, s = shrinkage(tl.to_numpy(X), standardize=True, gamma=gamma)
+        # else:
+        #    scatter_w = X @ X.conj().T
+
+        if self.shrinkage[k] == "lw":
+            scatter_w, _ = ledoit_wolf(tl.to_numpy(X.T), assume_centered=True)
+        elif self.shrinkage[k] == "oas":
+            scatter_w, _ = oas(tl.to_numpy(X.T), assume_centered=True)
+        else:
+            # order = len(X.shape[1:])
+            # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+            # scatter_w = tl.tensordot(X, X.conj(), axes=(modes, modes))
+            scatter_w = X @ X.conj().T
+            # scatter_w = shrunk_covariance(tl.to_numpy(scatter_w), self.shrinkage[k])
+
+            scatter_w = (1 - self.shrinkage[k]) * scatter_w + self.shrinkage[
+                k
+            ] * tl.mean(tl.diag(scatter_w)) * tl.eye(scatter_w.shape[0], dtype=X.dtype)
+
+        scatter_w = tl.tensor(scatter_w, dtype=X.dtype)
         # Force Toeplitz structure
         if self.toeplitz is not None and k in self.toeplitz:
-            scatter_w = force_toeplitz(scatter_w, taper=False)
+            scatter_w = force_toeplitz(scatter_w, taper=self.taper)
         return scatter_w
 
     def _scatter_b(self, means, class_counts, k):
         order = len(means.shape[1:])
         n_classes, *shape = means.shape
-        # Calculate scatter
+        # Calculate between class scatter
         modes = [kk for kk in range(order) if kk != k]
         scatter_b = 0
         for ci in range(n_classes):
             scatter_b += (
-                tl.tensordot(means[ci], means[ci], axes=(modes, modes))
+                tl.tensordot(means[ci], means[ci].conj(), axes=(modes, modes))
                 * class_counts[ci]
             )
-        # Force symmetry
-        scatter_b = (scatter_b + scatter_b.conj().T) / 2
         return scatter_b
 
     def _transform(self, X, y=None):
@@ -361,7 +430,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return X
 
     def transform(self, X, y=None):
-        X = tl.tensor(X)
+        X = tl.tensor(X, dtype=X.dtype)
         n_samples, *_ = X.shape
         Xt = self._transform(X, y)
         Xt = Xt.reshape((n_samples, -1))
@@ -378,7 +447,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.keep_train_score = keep_train_score
 
     def fit(self, X, y):
-        X = tl.tensor(X.copy())
+        X = tl.tensor(X.copy(), dtype=X.dtype)
         X_orig = X.copy()
         self.classes_, class_counts = np.unique(y, return_counts=True)
 
@@ -402,78 +471,25 @@ class BTTDA(BaseEstimator, TransformerMixin):
             if self.verbose:
                 print()
             X_rec += X_approx
-            mse = tl.mean((X_orig - X_rec) ** 2)
+            mse = np.real(tl.mean((X_orig - X_rec) ** 2))
             self.train_mse_.append(float(mse))
 
         return self
 
     def _transform(self, X, y=None):
+        # X = X.copy()
         n_samples, *_ = X.shape
         Xt = []
         for block in self.blocks_:
             Xtb = block._transform(X, y)
+            # Xrb = block._inv_transform(Xtb)
+            # X -= Xrb
             Xt.append(Xtb.reshape(n_samples, -1))
         Xt = tl.concatenate(Xt, axis=1)
         return Xt
 
     def transform(self, X, y=None):
-        X = tl.tensor(X)
+        X = tl.tensor(X, dtype=X.dtype)
         Xt = self._transform(X, y=None)
         Xt = tl.to_numpy(Xt)
         return Xt
-
-
-def shrink(cov, n_samples, shrinkage):
-    n_features, _ = cov.shape
-    # Shrinkage regularization
-    if shrinkage == "oas":
-        shrinkage = oas(cov, n_samples)
-    mu = tl.sum(tl.diag(cov)) / n_features
-    cov = cov + shrinkage * mu * tl.eye(n_features)
-    return cov, shrinkage
-
-
-def ledoit_wolf(X, gamma=None, T=None, S=None):
-    p, n = X.shape
-    # Xn = X - np.repeat(np.mean(X, axis=1, keepdims=True), n, axis=1)
-    Xn = X.copy()
-    if S is None:
-        S = np.matmul(Xn, Xn.T)
-    Xn2 = Xn**2
-    idxdiag = np.diag_indices(p)
-
-    nu = tl.mean(S[idxdiag])
-    if T is None:
-        T = nu * tl.eye(p, p)
-
-    # Ledoit Wolf
-    V = 1.0 / (n - 1) * (Xn2 @ Xn2.T - S**2 / n)
-    if gamma is None:
-        gamma = n * tl.sum(V) / tl.sum((S - T) ** 2)
-    if gamma > 1:
-        print("logger.warning('forcing gamma to 1')")
-        gamma = 1
-    elif gamma < 0:
-        print("logger.warning('forcing gamma to 0')")
-        gamma = 0
-    Cstar = (gamma * T + (1 - gamma) * S) / (n - 1)
-
-    return Cstar, gamma
-
-
-def oas(emp_cov, n_samples):
-    n_features = emp_cov.shape[0]
-    mu = tl.trace(emp_cov) / n_features
-
-    # formula from Chen et al.'s **implementation**
-    alpha = tl.mean(emp_cov**2)
-    num = alpha + mu**2
-    den = (n_samples + 1.0) * (alpha - (mu**2) / n_features)
-    if den == 0:
-        shrinkage = 1
-    else:
-        shrinkage = num / den
-    shrinkage = max(min(shrinkage, 1), 0)
-    return shrinkage
-    return shrinkage
-    return shrinkage
