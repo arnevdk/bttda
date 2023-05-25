@@ -21,25 +21,13 @@ def pinvh(A):
         raise NotImplementedError
 
 
-def trunc_gevd(A, B=None, r=None):
-    n = A.shape[0]
-    if r is None:
-        r = n
-    if tl.get_backend() == "numpy":
-        subset = [n - r, n - 1]
-        w, v = scipy.linalg.eigh(A, B, subset_by_index=subset)
-        w = w[::-1]
-        v = v[:, ::-1]
-    else:
-        raise NotImplementedError
-    return v, w
-
-
-def trunc_eigh(A, r=None, largest=True):
+def trunc_eigh(A, B=None, r=None, largest=True):
     if tl.get_backend() == "cupy":
+        if B is not None:
+            raise NotImplementedError
         w, v = cupy.linalg.eigh(A)
     else:
-        w, v = scipy.linalg.eigh(A)
+        w, v = scipy.linalg.eigh(A, b=B)
     sign = 1
     if largest:
         sign = -1
