@@ -438,7 +438,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return scatter_b
 
     def transform(self, X, y=None):
-        X = tl.tensor(X)
+        X = tl.tensor(X, dtype=X.dtype)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
             X, self.scalings_, modes=range(1, order + 1), transpose=True
@@ -446,7 +446,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None):
-        Xt = tl.tensor(Xt)
+        Xt = tl.tensor(Xt, dtype=Xt.dtype)
         order = len(Xt.shape) - 1
         activation_patterns = []
         for k in range(order):
@@ -470,7 +470,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y):
         X = tl.tensor(X.copy(), dtype=X.dtype)
-        X_orig = X.copy()
         self.classes_, class_counts = np.unique(y, return_counts=True)
 
         hoda_params = self.hoda_params
@@ -478,16 +477,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
             hoda_params = dict()
 
         self.blocks_ = []
-        self.train_info_ = dict(
-            mse=[],
-            f_score=[],
-        )
-        self.train_mse_ = []
-        X_rec = 0
-        last_f_score = 0
         n_blocks = self.n_blocks
-        if n_blocks is None:
-            n_blocks = 512
+        # Deflation scheme
         for b in range(n_blocks):
             if self.verbose:
                 print(f"Fitting block {b+1}/{self.n_blocks}...")
@@ -500,33 +491,19 @@ class BTTDA(BaseEstimator, TransformerMixin):
             X -= X_approx
             if self.verbose:
                 print()
-            X_rec += X_approx
-            mse = np.real(tl.mean((X_orig - X_rec) ** 2))
-            f_score = fisher_score(self.transform(X), y)
-            if self.n_blocks is None and f_score <= last_f_score:
-                self.blocks_.pop()
-                break
-            last_f_score = f_score
-            if self.keep_train_info:
-                self.train_info_["mse"].append(float(mse))
-                self.train_info_["f_score"].append(f_score)
-
         return self
 
-    def _transform(self, X, y=None):
-        X = X.copy()
-        n_samples, *_ = X.shape
-        Xt = []
-        for block in self.blocks_:
-            Xtb = block.transform(X, y)
-            Xrb = block.inv_transform(Xtb)
-            # X -= Xrb
-            Xt.append(Xtb.reshape(n_samples, -1))
-        Xt = tl.concatenate(Xt, axis=1)
-        return Xt
+    #    def transform(self, X, y=None):
+    #        X = tl.tensor(X.copy(), dtype=X.dtype)
+    #        n_samples, *_ = X.shape
+    #        Xt = []
+    #        for block in self.blocks_:
+    #            Xtb = block.transform(X, y)
+    #            Xrb = block.inv_transform(Xtb)
+    #            X -= Xrb
+    #            Xt.append(Xtb.reshape(n_samples, -1))
+    #        Xt = tl.concatenate(Xt, axis=1)
+    #        return Xt
 
-    def transform(self, X, y=None):
-        X = tl.tensor(X, dtype=X.dtype)
-        Xt = self._transform(X, y=None)
-        Xt = tl.to_numpy(Xt)
-        return Xt
+    def inv_transform():
+        pass
