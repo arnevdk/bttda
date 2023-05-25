@@ -271,6 +271,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Iteratively find projections
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
+        self.cov_l_ = []
+        self.cov_l_inv_ = []
+        for k in range(order):
+            self.cov_l_.append(tl.eye(self.rank_[k]))
+            self.cov_l_inv_.append(tl.eye(self.rank_[k]))
+
         iterator = range(self.max_iter)
         if self.verbose:
             iterator = tqdm(iterator)
@@ -355,8 +361,22 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 self.scalings_[k] = u
                 self.weightings_[k] = w
 
-            # Store iteration training information
+            # Transform
             core = self.transform(X, y)
+
+            # Calculate latent factor covariance
+            # TODO: make cov function
+            core_centered = core.copy()
+            for c in self.classes_:
+                core_centered[y == c] -= tl.mean(core[y == c], axis=0)
+            for k in range(order):
+                # TODO: tensor contraction instead of unfolding
+                core_c_k = tl.unfold(core_centered, k + 1)
+                cov = (core_c_k @ core_c_k.conj().T) / (core_c_k.shape[-1] - 1)
+                self.cov_l_[k] = cov
+                self.cov_l_inv_[k] = pinvh(cov)
+
+            # Store iteration training information
             if self.keep_train_info:
                 f_score = fisher_score(core, y)
                 mse = np.abs(tl.mean((self.inv_transform(core) - X) ** 2))
@@ -366,20 +386,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             # Check convergence
             if update < self.tol:
                 break
-
-            # Calculate latent factor scatter
-            self.cov_l_ = []
-            self.cov_l_inv_ = []
-            # TODO: make cov function
-            core_centered = core.copy()
-            for c in self.classes_:
-                core_centered[y == c] -= tl.mean(core[y == c], axis=0)
-            for k in range(order):
-                # TODO: tensor contraction instead of unfolding
-                core_c_k = tl.unfold(core_centered, k + 1)
-                cov = (core_c_k @ core_c_k.conj().T) / (core_c_k.shape[-1] - 1)
-                self.cov_l_.append(cov)
-                self.cov_l_inv_.append(pinvh(cov))
 
         return self
 
