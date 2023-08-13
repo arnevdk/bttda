@@ -11,65 +11,77 @@ from sklearn.linear_model import ElasticNet
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
-from hoda.tenalg import det, force_toeplitz, lobpcg, pinvh, trunc_eigh
+from hoda.tenalg import det, force_toeplitz, pinvh, trunc_eigh
 
 
-def solve_ratio_svd(scatter_b, scatter_t, v, r):
-    v, w, _ = tensorly.tenalg.svd_interface(pinvh(scatter_t) @ scatter_b, n_eigenvecs=r)
-    o = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    return v, w, np.real(o)
+def obj_ratio(scatter_b, scatter_t, _):
+    """Ratio trace objective.
+
+    Phan, A. H., & Cichocki, A. (2010).
+    Tensor decompositions for feature extraction and classification of high
+    dimensional datasets. Nonlinear theory and its applications, IEICE, 1(1), 37-68.
+    """
+    return scatter_b, scatter_t, True
 
 
-def solve_ratio_gevd(scatter_b, scatter_t, v, r):
-    v, w = trunc_eigh(scatter_b, scatter_t, r=r, largest=True)
-    o = tl.sum(w)
-    return v, w, o
+def obj_diff(scatter_b, scatter_t, v, psi=1):
+    """Trace ratio or difference objective.
 
+    Phan, A. H., & Cichocki, A. (2010).
+    Tensor decompositions for feature extraction and classification of high
+    dimensional datasets. Nonlinear theory and its applications, IEICE, 1(1), 37-68.
 
-def solve_ratio_lanczos(scatter_b, scatter_t, v, r):
-    raise NotImplementedError
-
-
-def solve_ratio_lobpcg(scatter_b, scatter_t, v, r, **solver_params):
-    solver_params["max_iter"] = 1
-    w, v = lobpcg(scatter_b, v, B=scatter_t, largest=True, **solver_params)
-    return v, w
-
-
-def solve_diff(scatter_b, scatter_t, v, r, psi=1):
+    Wang, H., Yan, S., Xu, D., Tang, X., & Huang, T. (2007, June). Trace ratio
+    vs. ratio trace for dimensionality reduction. In 2007 IEEE Conference on
+    Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
+    """
     phi = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    v, w = trunc_eigh(scatter_b - psi * phi * scatter_t, r=r, largest=True)
-    o = tl.sum(w)
-    return v, w, o
+    return scatter_b - psi * phi * scatter_t, None, True
 
 
-def solve_lfl(scatter_b, scatter_t, v, r, psi=1):
+def obj_lfl(scatter_b, scatter_t, v, psi=1):
+    """Linear feature learning obbjective.
+
+    Aghili, S. N., Kilani, S., Khushaba, R. N., & Rouhani, E. (2023).
+    A spatial-temporal linear feature learning algorithm for P300-based -
+    brain-computer interfaces. Heliyon, 9(4).
+    """
     phi = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    v, w = trunc_eigh(scatter_b - psi * phi * scatter_t, B=scatter_t, r=r, largest=True)
-    o = tl.sum(w)
-    return v, w, o
+    return scatter_b - psi * phi * scatter_t, scatter_t, True
 
 
-def solve_od(scatter_b, scatter_t, v, r):
+def obj_od(scatter_b, scatter_t, v):
+    """Optimal dimensionality discriminant analysis
+
+    Nie, F., Xiang, S., Song, Y., & Zhang, C. (2007, April).
+    Extracting the optimal dimensionality for discriminant analysis. In 2007
+    IEEE International Conference on Acoustics, Speech and Signal Processing-ICASSP'07 (Vol. 2, pp. II-617). IEEE.
+
+    Wang, J., Wang, L., Nie, F., & Li, X. (2021). A novel formulation of trace ratio linear discriminant analysis. IEEE Transactions on Neural Networks and Learning Systems, 33(10), 5568-5578.
+    """
     s = tl.trace(v.T @ scatter_b @ v) / tl.trace(v.T @ scatter_t @ v)
-    v, w = trunc_eigh(s**2 * scatter_t - 2 * s * scatter_b, r=r, largest=False)
-    o = tl.sum(w)
-    return -v, -w, o
+    return s**2 * scatter_t - 2 * s * scatter_b, None, False
 
 
-def solve_sr(scatter_w, scatter_t, v, w, r):
+def obj_sr(
+    scatter_w,
+    scatter_t,
+    v,
+):
+    """
+    Idaji, M. J., Shamsollahi, M. B., & Sardouie, S. H. (2017).
+    Higher order spectral regression discriminant analysis (HOSRDA): A tensor
+    feature reduction method for ERP detection. Pattern Recognition, 70, 152-162.
+    """
     raise NotImplementedError
 
 
-SOLVERS = dict(
-    ratio_svd=solve_ratio_svd,
-    ratio_gevd=solve_ratio_gevd,
-    ratio_lanczos=solve_ratio_lanczos,
-    ratio_lobpcg=solve_ratio_lobpcg,
-    diff=solve_diff,
-    sr=solve_sr,
-    od=solve_od,
-    lfl=solve_lfl,
+OBJECTIVES = dict(
+    ratio=obj_ratio,
+    diff=obj_diff,
+    lfl=obj_lfl,
+    od=obj_od,
+    sr=obj_sr,
 )
 
 
@@ -87,8 +99,6 @@ def fisher_score(X, y):
     scatter_b = 0
     for ci, c in enumerate(classes):
         scatter_b += class_counts[ci] * tl.norm(means[ci] - class_mean, order=2) ** 2
-    # Calculate whithin class scatter
-    scatter_w = tl.norm(X_centered, order=2) ** 2
     # Calculate f score
     return float(scatter_b / scatter_t)
 
@@ -121,11 +131,12 @@ def mode_scatter(X, k, weights=None, shrinkage=0, assume_centered=False):
         )
 
         scatter = tl.tensor(scatter)
+        scatter *= X.shape[1] - 1
     elif shrinkage == "oas":
         X = tl.unfold(X, k + 1)
         scatter, shrinkage = oas(tl.to_numpy(X.T), assume_centered=assume_centered)
         scatter = tl.tensor(scatter)
-
+        scatter *= X.shape[1] - 1
     else:
         order = len(X.shape[1:])
         modes = [0] + [kk + 1 for kk in range(order) if kk != k]
@@ -151,11 +162,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         init="mlsvd",
         shrinkage="oas",
         toeplitz=None,
-        solver="ratio_gevd",
+        taper=False,
+        obj="ratio",
+        solver="lanczos",
         verbose=False,
         solver_params=None,
         keep_train_info=False,
-        taper=False,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -163,6 +175,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.init = init
         self.shrinkage = shrinkage
         self.toeplitz = toeplitz
+        self.obj = obj
         self.solver = solver
         self.verbose = verbose
         self.solver_params = solver_params
@@ -182,8 +195,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.rank_ = self.rank
 
         # Initialize solver.T
-        if self.solver not in SOLVERS.keys():
-            raise ValueError(f"solver must be one of {list(SOLVERS.keys())}")
+        if self.obj not in OBJECTIVES.keys():
+            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
         solver_params = self.solver_params
         if solver_params is None:
             solver_params = dict()
@@ -206,14 +219,35 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     means_centered, k, weights=tl.sqrt(class_counts)
                 )
                 # Solve
-                u, w, obj = SOLVERS[self.solver](
-                    scatter_b,
-                    scatter_w,
-                    tl.eye(shape[k], dtype=X.dtype),
-                    None,
-                    **solver_params,
-                )
-                self.rank_[k] = np.count_nonzero(w > 0)
+                last_obj = np.inf
+
+                for r in range(1, shape[k] + 1):
+                    u = tl.eye(shape[k], dtype=X.dtype)[:, :r]
+                    last_u = u
+                    for t in range(self.max_iter):
+                        A, B, largest = obj_od(scatter_b, scatter_w, u)
+                        u, w = trunc_eigh(
+                            A,
+                            B,
+                            init=u,
+                            r=r,
+                            largest=largest,
+                            method=self.solver,
+                            **solver_params,
+                        )
+
+                        if tl.norm(u - last_u, order=2) < self.tol:
+                            break
+                        last_u = u
+                    s = tl.trace(u.T @ scatter_b @ u)
+                    s /= tl.trace(u.T @ scatter_w @ u)
+                    obj = s**2 * tl.trace(u.T @ scatter_w @ u) - 2 * s * tl.trace(
+                        u.T @ scatter_b @ u
+                    )
+                    if obj > last_obj:
+                        self.rank_[k] = r - 1
+                        break
+                    last_obj = obj
 
         # Initialize projections
         if self.verbose:
@@ -257,6 +291,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Initialize scatter matrices
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
+        self.cov_w_ = [None] * order
         self.cov_l_ = []
         self.cov_l_inv_ = []
         self.scatter_t_ = []
@@ -313,23 +348,29 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 self.scatter_b_[k] = scatter_b
 
                 # Solve
-                u, w, obj = SOLVERS[self.solver](
-                    scatter_b,
-                    scatter_w,
-                    self.scalings_[k],
-                    self.rank_[k],
+                A, B, largest = OBJECTIVES[self.obj](
+                    scatter_b, scatter_w, self.scalings_[k]
+                )
+                u, w = trunc_eigh(
+                    A,
+                    B,
+                    init=self.scalings_[k],
+                    r=self.rank_[k],
+                    method=self.solver,
+                    largest=largest,
                     **solver_params,
                 )
-                u, w, _ = tensorly.tenalg.svd_interface(
-                    u @ u.T @ self.scatter_t_[k] @ u @ u.T,
-                    n_eigenvecs=self.rank_[k],
-                    flip_sign=True,
-                )
+                # Why this line?
+                # u, w, _ = tensorly.tenalg.svd_interface(
+                #    u @ u.T @ self.scatter_t_[k] @ u @ u.T,
+                #    n_eigenvecs=self.rank_[k],
+                #    flip_sign=True,
+                # )
                 u, _ = tl.qr(u, mode="reduced")
 
-                mode_update = tl.norm(u - self.scalings_[k], order=2) / (
-                    shape[k] * self.rank_[k] * (tl.norm(X) / np.prod(X.shape))
-                )
+                obj = tl.sum(w)
+
+                mode_update = tl.norm(u - self.scalings_[k], order=2)
                 update += mode_update
                 # Store mode training information
                 if self.keep_train_info:
@@ -339,13 +380,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 self.scalings_[k] = u
                 self.weightings_[k] = w
-
             # Calculate latent factor covariance
             core = self.transform(X, y)
             core_centered = core.copy()
             for c in self.classes_:
                 core_centered[y == c] -= tl.mean(core[y == c], axis=0)
             for k in range(order):
+                self.cov_w_[k] = self.scatter_w_[k] / (
+                    tl.prod(core.shape) / core.shape[k + 1] - 1
+                )
+
                 scatter_l, _ = mode_scatter(core_centered, k, assume_centered=True)
                 cov_l = scatter_l / (tl.prod(core.shape) / core.shape[k + 1] - 1)
                 self.cov_l_[k] = cov_l
@@ -378,7 +422,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         activation_patterns = []
         for k in range(order):
             # Haufe method
-            ap = self.scatter_w_[k] @ self.scalings_[k] @ self.cov_l_inv_[k]
+            ap = self.cov_w_[k] @ self.scalings_[k] @ self.cov_l_inv_[k]
             activation_patterns.append(ap)
         X = tl.tenalg.multi_mode_dot(
             Xt, activation_patterns, modes=range(1, order + 1), transpose=False

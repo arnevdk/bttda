@@ -21,13 +21,26 @@ def pinvh(A):
         raise NotImplementedError
 
 
-def trunc_eigh(A, B=None, r=None, largest=True):
-    if tl.get_backend() == "cupy":
-        if B is not None:
-            raise NotImplementedError
-        w, v = cupy.linalg.eigh(A)
-    else:
-        w, v = scipy.linalg.eigh(A, b=B)
+def trunc_eigh(
+    A, B=None, r=None, largest=True, init=None, method="lanczos", solver_params=None
+):
+    """
+
+    SVD eigensolver can only be used if  B^-1@A is semi-positive definite
+    """
+    if init is None:
+        init = tl.eye(A.shape, dtype=A.dtype)
+    solver_params = solver_params or dict()
+    if method == "lanczos":
+        v, w = lanczos(A, B=B, **solver_params)
+    elif method == "svd":
+        if B is None:
+            solver_params["flip_sign"] = True
+            v, w, _ = tl.tenalg.svd_interface(A, **solver_params)
+        else:
+            v, w, _ = tl.tenalg.svd_interface(pinvh(B) @ A, **solver_params)
+    elif method == "lobpcg":
+        v, w = lobpcg(A, init, B=B)
     sign = 1
     if largest:
         sign = -1
@@ -37,13 +50,27 @@ def trunc_eigh(A, B=None, r=None, largest=True):
     return v, w
 
 
-def lobpcg(*args, **kwargs):
+def lanczos(A, B=None, **kwargs):
     if tl.get_backend() == "cupy":
-        return cupyx.scipy.sparse.linalg.lobpcg(*args, **kwargs)
+        if B is not None:
+            w, v = cupy.linalg.eigh(pinvh(B) @ A, **kwargs)
+        else:
+            w, v = cupy.linalg.eigh(A, **kwargs)
     elif tl.get_backend() == "numpy":
-        return scipy.sparse.linalg.lobpcg(*args, **kwargs)
+        w, v = scipy.linalg.eigh(A, b=B, **kwargs)
     else:
         raise NotImplementedError
+    return v, w
+
+
+def lobpcg(A, init, B=None, **kwargs):
+    if tl.get_backend() == "cupy":
+        w, v = cupyx.scipy.sparse.linalg.lobpcg(A, init, B=B, **kwargs)
+    elif tl.get_backend() == "numpy":
+        w, v = scipy.sparse.linalg.lobpcg(A, init, B=B, **kwargs)
+    else:
+        raise NotImplementedError
+    return v, w
 
 
 def toeplitz(a):
@@ -61,15 +88,11 @@ def force_toeplitz(A, taper=False):
     toep = tl.zeros(n, dtype=A.dtype)
     for i in range(n):
         diag = tl.diag(A, k=i)
-        # tl.mean(diag, out=toep[i])
         toep[i] = tl.mean(diag)
-        # diag_mask = tl.diag(np.ones(i, dtype=bool))
-        # tl.mean(A, out=toep[i], where=diag_mask)
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper
-    cov_toep = toeplitz(toep)
-    return cov_toep
+    return toeplitz(toep)
 
 
 def det(A):
