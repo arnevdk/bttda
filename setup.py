@@ -8,5 +8,4 @@ setup(
     author="Arne Van Den Kerchove",
     author_email="arne.vandenkerchove@kuleuven.be",
     packages=["hoda"],
-    install_requires=["setuptools", "sklearn", "tensorly"],
 )

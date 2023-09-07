@@ -1,7 +1,11 @@
-moabb
-seaborn
+# Algorithm
 tensorly
-jupyter
-sklearn
-toeplitzlda
+cupy
 tqdm
+statsmodels
+
+# Notebooks and testing
+pyyaml<5.4.0
+git+https://github.com/NeuroTechX/moabb.git
+jupyter
+toeplitzlda

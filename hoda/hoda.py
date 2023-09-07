@@ -18,7 +18,7 @@ from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
 from hoda.tenalg import (det, force_toeplitz, ledoit_wolf_shrinkage, maximum,
-                         pinvh, trunc_eigh)
+                         solve, trunc_eigh)
 
 
 def obj_ratio(scatter_b, scatter_t, _):
@@ -150,14 +150,24 @@ def center(X, y):
     n_classes = len(classes)
 
     means = tl.zeros((n_classes, *shape), dtype=X.dtype)
-    X_centered = []
-    for ci, c in enumerate(classes):
-        where = y == c
-        where = where.reshape((where.shape[0], 1, 1))
-        X_where = X[y == c]
-        means[ci] = tl.mean(X_where, axis=0)
-        X_centered.append(X_where - means[ci])
-    X_centered = tl.concatenate(X_centered, axis=0)
+    if tl.get_backend() == "cupy":
+        X_centered = tl.zeros((n_classes, *X.shape))
+        for ci, c in enumerate(classes):
+            X_where = cupy.where(
+                cupy.array(y == c)[:, np.newaxis, np.newaxis],
+                X,
+                cupy.full_like(X, cupy.nan),
+            )
+            means[ci] = cupy.nanmean(X_where, axis=0)
+            X_centered[ci] = X_where - means[ci]
+        X_centered = cupy.nansum(X_centered, axis=0)
+    else:
+        X_centered = []
+        for ci, c in enumerate(classes):
+            X_where = X[y == c]
+            means[ci] = tl.mean(X_where, axis=0)
+            X_centered.append(X_where - means[ci])
+        X_centered = tl.concatenate(X_centered, axis=0)
     return means, X_centered
 
 
@@ -226,8 +236,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         order = len(shape)
         if self.rank is None:
             self.rank_ = shape.copy()
+            self.rank = shape.copy()
         else:
-            self.rank_ = self.rank
+            self.rank_ = self.rank.copy()
 
         # Initialize solver
         if self.obj not in OBJECTIVES.keys():
@@ -245,9 +256,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             print("Initializing factors...")
         self.scalings_ = self._init(X, shape)
 
-        if self.rank is None:
-            self.rank = shape
-
         # Initialize iterative algorithm
         for k in range(order):
             self.scalings_[k] = self.scalings_[k][:, : self.rank_[k]]
@@ -256,6 +264,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.scatter_t_ = []
         for k in range(order):
             self.scatter_t_.append(mode_scatter(X, k, assume_centered=False)[0])
+        self.lambda_ = 0
 
         # Initialze training information
         if self.keep_train_info:
@@ -342,15 +351,25 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self._fit_inverse(X, Xt, y)
 
             # Lasso
-            Xt, lambd = self._learn_sparse_coef(X, Xt)
-            for k in range(order):
-                modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                drop_idc = (
-                    tl.sum(tl.abs(Xt), axis=modes) / tl.sum(tl.abs(Xt))
-                    < (1 - 0.90) / shape[k]
-                )
-                self.scalings_[k] = self.scalings_[k][:, ~drop_idc]
-                self.rank_[k] = int(np.count_nonzero(~drop_idc))
+            Xt, self.lambda_ = self._learn_sparse_coef(X, Xt)
+
+            # for k in range(order):
+            #    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+            #    Xtk = tl.unfold(Xt, k + 1)
+            #    relevance = tl.sum(tl.abs(Xtk), axis=-1)
+            #    relevance = relevance / tl.sum(relevance)
+            #    keep_idc = relevance > 0.2
+            #    self.scalings_[k] = self.scalings_[k][:, keep_idc]
+            #    self.rank_[k] = self.scalings_[k].shape[1]
+
+            # Select discriminatory components
+            # F = tl.zeros(shape)
+            # Xt_class_mean = tl.zeros(shape)
+            # for c in self.classes_:
+            #    Xt_class_mean += tl.mean(Xt[y == c]) / len(self.classes_)
+            # Xt_c = Xt - Xt_class_mean
+            # F = tl.mean(tl.abs(Xt_c), axis=0)
+
             # TODO replace with drop columns
             Xt = self.transform(X)
             self._fit_inverse(X, Xt, y)
@@ -372,12 +391,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 self.train_info_["f_stat"].append(f_stat(Xt, y))
                 X_rec = self.inv_transform(Xt)
                 self.train_info_["mse"].append(mse(X, X_rec))
-                self.train_info_["lambd"].append(lambd)
+                self.train_info_["lambd"].append(self.lambda_)
                 self.train_info_["update"].append(update)
 
-            # Check convergence
-            if update < self.tol:
-                break
+            ## Check convergence
+            # if update < self.tol:
+            #    break
         if self.verbose:
             print(f"Fitted tucker model of rank {self.rank_} ...")
 
@@ -424,11 +443,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         order = len(shape)
         self.cov_w_ = [None] * order
         self.cov_l_ = []
-        self.cov_l_inv_ = []
         self.aps_ = [None] * len(self.scalings_)
         for k in range(order):
             self.cov_l_.append(tl.eye(self.rank_[k]))
-            self.cov_l_inv_.append(tl.eye(self.rank_[k]))
 
         _, core_centered = center(core, y)
         for k in range(order):
@@ -438,32 +455,32 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             scatter_l, _ = mode_scatter(core_centered, k, assume_centered=True)
             cov_l = scatter_l / (math.prod(core.shape) / core.shape[k + 1] - 1)
             self.cov_l_[k] = cov_l
-            self.cov_l_inv_[k] = pinvh(cov_l)
             # Haufe method
-            self.aps_[k] = self.cov_w_[k] @ self.scalings_[k] @ self.cov_l_inv_[k]
+            self.aps_[k] = self.cov_w_[k] @ solve(self.cov_l_[k], self.scalings_[k].T).T
 
     def _learn_sparse_coef(self, X, Xt):
         se = tl.sum((X - self.inv_transform(Xt)) ** 2)
-        snr = tl.tensor(0.1)
+        snr = 1
         epsilon = 10 ** (-snr / 10) * tl.sum(X**2)
         tol = 1e-8
-        if se >= epsilon:
-            return Xt, 0
-        lambda_l = 0
+        # if se >= epsilon:
+        #    return Xt, self.lambda_
+        lambda_l = tl.tensor(0)
         lambda_h = tl.max(tl.abs(Xt))
         sign = tl.sign(Xt)
         abs_Xt = tl.abs(Xt)
         zeros = tl.zeros_like(Xt)
         # lambda_h = tl.min(tl.abs(Xt))
         # while True:
-        #    Xt_sparse = tl.sign(Xt) * maximum(tl.abs(Xt) - lambda_h, tl.zeros_like(Xt))
+        #    Xt_sparse = tl.sign(Xt) * maximum(tl.abs(Xt) - lambda_h, tl.zeros_like(Xt))0
         #    se = tl.sum((X - self.inv_transform(Xt_sparse)) ** 2)
         #    if se >= epsilon:
         #        break
         #    else:
         #        lambda_l = lambda_h
         #        lambda_h = 2 * lambda_h
-        while (lambda_h - lambda_l) / lambda_h > tol:
+        tol_iter = int(math.log(1 / tol))
+        for i in range(tol_iter):
             lambda_m = (lambda_l + lambda_h) / 2
             Xt_sparse = sign * maximum(abs_Xt - lambda_m, zeros)
             se = tl.sum((X - self.inv_transform(Xt_sparse)) ** 2)
@@ -475,7 +492,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             #    lambda_h = lambda_m
             # else:
             #    lambda_l = lambda_m
-        return Xt_sparse, float(lambda_m)
+        return Xt_sparse, lambda_m
 
     def transform(self, X, y=None):
         if not tl.is_tensor(X):

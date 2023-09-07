@@ -23,6 +23,15 @@ def pinvh(A):
         raise NotImplementedError
 
 
+def solve(A, B):
+    if tl.get_backend() == "cupy":
+        return cupy.linalg.solve(A, B)
+    elif tl.get_backend() == "numpy":
+        return scipy.linalg.solve(A, B)
+    else:
+        raise NotImplementedError
+
+
 def trunc_eigh(
     A, B=None, rank=None, largest=True, init=None, method="lanczos", solver_params=None
 ):
@@ -62,7 +71,11 @@ def lanczos(A, B=None, rank=None, largest=True, **kwargs):
         if B is not None:
             w, v = cupy.linalg.eigh(pinvh(B) @ A, **kwargs)
         else:
-            w, v = cupy.linalg.eigh(A, **kwargs)
+            # w, v = cupy.linalg.eigh(A, **kwargs)
+            which = "LA" if largest else "SA"
+            w, v = cupyx.scipy.sparse.linalg.eigsh(
+                A, k=rank, return_eigenvectors=True, which=which, **kwargs
+            )
         if largest:
             w = w[-rank:]
             v = v[:, -rank:]
