@@ -68,20 +68,15 @@ def lanczos(A, B=None, rank=None, largest=True, **kwargs):
     if rank is None:
         rank = A.shape[0]
     if tl.get_backend() == "cupy":
+        which = "LA" if largest else "SA"
         if B is not None:
-            w, v = cupy.linalg.eigh(pinvh(B) @ A, **kwargs)
+            w, v = cupyx.scipy.sparse.linalg.eigsh(
+                pinvh(B) @ A, k=rank, return_eigenvectors=True, which=which, **kwargs
+            )
         else:
-            # w, v = cupy.linalg.eigh(A, **kwargs)
-            which = "LA" if largest else "SA"
             w, v = cupyx.scipy.sparse.linalg.eigsh(
                 A, k=rank, return_eigenvectors=True, which=which, **kwargs
             )
-        if largest:
-            w = w[-rank:]
-            v = v[:, -rank:]
-        else:
-            w = w[:rank]
-            v = v[:, :rank]
     elif tl.get_backend() == "numpy":
         if largest:
             n = A.shape[0]
@@ -95,6 +90,7 @@ def lanczos(A, B=None, rank=None, largest=True, **kwargs):
 
 
 def lobpcg(A, init, B=None, rank=None, largest=True, **kwargs):
+    raise NotImplementedError  # TODO: largest magnitude
     if tl.get_backend() == "cupy":
         w, v = cupyx.scipy.sparse.linalg.lobpcg(A, init, B=B, **kwargs)
     elif tl.get_backend() == "numpy":

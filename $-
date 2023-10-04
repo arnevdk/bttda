@@ -12,8 +12,6 @@ import tensorly.tenalg
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.covariance import ledoit_wolf, oas, shrunk_covariance
 from sklearn.metrics import log_loss
-from statsmodels.discrete.discrete_model import Logit
-from statsmodels.genmod.generalized_linear_model import GLM
 from statsmodels.multivariate.manova import MANOVA
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
@@ -320,40 +318,26 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
             # Lasso
             if self.lasso:
-                _, y_int = np.unique(y, return_index=True)
                 # Xt_sparse, self.lambda_ = self._learn_sparse_coef(X, Xt, snr=5)
                 Xt_sparse = Xt
                 self.lamda_ = 0
-                _, Xt_sparse_c = center(Xt_sparse, y)
                 # Calculate F statistic
                 samples = []
                 for c in self.classes_:
                     samples.append(cupy.asnumpy(Xt_sparse)[y == c])
                 F, p = scipy.stats.f_oneway(*samples, axis=0)
-                p = np.nan_to_num(p, nan=1)
                 # Select discriminatory components
                 for k in range(order):
-                    pk = tl.unfold(p, k)
-                    p_comb = tl.zeros(pk.shape[0])
-                    for r in range(self.rank_[k]):
-                        p_comb[r] = scipy.stats.combine_pvalues(
-                            pk[r], method="fisher"
-                        ).pvalue
-                    p_comb = np.nan_to_num(p_comb, nan=1)
-                    idc = np.argsort(p_comb)
-                    last_F = 0
-                    r = 1
-                    for r in range(1, self.rank_[k] + 1):
-                        Xt_sparse_pruned = np.take(Xt_sparse, idc[:r], axis=k + 1)
-                        F = f_stat(Xt_sparse_pruned, y)
-                        if F <= last_F:
-                            break
-                        last_F = F
-
-                    idc = idc[:r]
-                    self.scalings_[k] = self.scalings_[k][:, idc]
-                    self.rank_[k] = self.scalings_[k].shape[-1]
-            print(self.rank_)
+                    modes = [kk for kk in range(order) if kk != k]
+                    pk = tl.unfold(F, k)
+                    n_other = Fk.shape[-1]
+                    print(n_other)
+                    Fk = tl.prod(Fk, axis=-1) ** (1 / n_other)
+                    print(Fk)
+                    # idc = np.where(Fk > 0.01)[0]
+                    # self.scalings_[k] = self.scalings_[k][:, idc]
+                    # self.rank_[k] = self.scalings_[k].shape[-1]
+                    # F = np.take(F, idc, axis=k)
             ## Orthonormalize
             for k in range(order):
                 self.scalings_[k], _ = tl.qr(self.scalings_[k], mode="reduced")
@@ -497,15 +481,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             Xt, self.aps_, modes=range(1, order + 1), transpose=False
         )
         return X
-
-    def log_likelihood(X):
-        """Based on the Multilinear normal distribution and LDA
-
-        Ohlson, Martin, M. Rauf Ahmad, and Dietrich Von Rosen.
-        "The multilinear normal distribution: Introduction and some basic properties."
-        Journal of Multivariate Analysis 113 (2013): 37-47.
-        """
-        pass
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
