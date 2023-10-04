@@ -5,6 +5,7 @@ import ipdb
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
+import seaborn as sns
 import statsmodels.api as sm
 import tensorly as tl
 import tensorly.decomposition
@@ -340,20 +341,23 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                             pk[r], method="fisher"
                         ).pvalue
                     p_comb = np.nan_to_num(p_comb, nan=1)
-                    idc = np.argsort(p_comb)
-                    last_F = 0
-                    r = 1
-                    for r in range(1, self.rank_[k] + 1):
-                        Xt_sparse_pruned = np.take(Xt_sparse, idc[:r], axis=k + 1)
-                        F = f_stat(Xt_sparse_pruned, y)
-                        if F <= last_F:
-                            break
-                        last_F = F
-
-                    idc = idc[:r]
+                    idc = p_comb < 0.5
+                    if not np.count_nonzero(idc):
+                        idc = p_comb < 0.95
+                    if not np.count_nonzero(idc):
+                        idc = p_comb <= 1
                     self.scalings_[k] = self.scalings_[k][:, idc]
+
                     self.rank_[k] = self.scalings_[k].shape[-1]
-            print(self.rank_)
+                    # idc = np.argsort(p_comb)
+                    # Fs = tl.zeros(self.rank_[k])
+                    # for r in range(self.rank_[k]):
+                    #    Xt_sparse_pruned = np.take(Xt_sparse, idc[: r + 1], axis=k + 1)
+                    #    F = f_stat(Xt_sparse_pruned, y)
+                    #    Fs[r] = F
+                    # self.rank_[k] = np.argmax(Fs) + 1
+                    # idc = idc[: self.rank_[k]]
+                    # self.scalings_[k] = self.scalings_[k][:, idc]
             ## Orthonormalize
             for k in range(order):
                 self.scalings_[k], _ = tl.qr(self.scalings_[k], mode="reduced")
