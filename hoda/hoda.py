@@ -2,20 +2,15 @@ import math
 
 import cupy
 import ipdb
-import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
-import seaborn as sns
-import statsmodels.api as sm
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
-from sklearn.covariance import ledoit_wolf, oas, shrunk_covariance
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.feature_selection import f_classif
 from sklearn.metrics import log_loss
-from statsmodels.discrete.discrete_model import Logit
-from statsmodels.genmod.generalized_linear_model import GLM
-from statsmodels.multivariate.manova import MANOVA
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
@@ -155,7 +150,7 @@ def mode_scatter(X, k, weights=None, shrinkage=0, assume_centered=False):
     #    scatter *= X.shape[1] - 1
     if shrinkage == "lw":
         Xf = tl.unfold(X, k + 1).T
-        shrinkage = ledoit_wolf_shrinkage(Xf)
+        shrinkage = ledoit_wolf_shrinkage(Xf, assume_centered=assume_centered)
     order = len(X.shape[1:])
     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
     if not assume_centered:
@@ -183,7 +178,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         taper=False,
         obj="tr",
         solver="lanczos",
-        lasso=True,
+        lasso=False,
+        prune=True,
+        combine_p="fisher",
         verbose=False,
         solver_params=None,
         keep_train_info=False,
@@ -201,10 +198,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.keep_train_info = keep_train_info
         self.taper = taper
         self.lasso = lasso
+        self.prune = prune
+        self.combine_p = combine_p
 
     def fit(self, X, y):
         # Setup
-        X = tl.tensor(X.copy(), dtype=X.dtype)
+        X = tl.tensor(X.copy())
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
         n_samples, *shape = X.shape
@@ -317,52 +316,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             old_scalings = self.scalings_
             self.scalings_ = new_scalings
             Xt = self.transform(X)
-            self._fit_inverse(X, Xt, y)
 
             # Lasso
             if self.lasso:
-                _, y_int = np.unique(y, return_index=True)
-                # Xt_sparse, self.lambda_ = self._learn_sparse_coef(X, Xt, snr=5)
-                Xt_sparse = Xt
-                self.lamda_ = 0
-                _, Xt_sparse_c = center(Xt_sparse, y)
-                # Calculate F statistic
-                samples = []
-                for c in self.classes_:
-                    samples.append(cupy.asnumpy(Xt_sparse)[y == c])
-                F, p = scipy.stats.f_oneway(*samples, axis=0)
-                p = np.nan_to_num(p, nan=1)
-                # Select discriminatory components
-                for k in range(order):
-                    pk = tl.unfold(p, k)
-                    p_comb = tl.zeros(pk.shape[0])
-                    for r in range(self.rank_[k]):
-                        p_comb[r] = scipy.stats.combine_pvalues(
-                            pk[r], method="fisher"
-                        ).pvalue
-                    p_comb = np.nan_to_num(p_comb, nan=1)
-                    idc = p_comb < 0.5
-                    if not np.count_nonzero(idc):
-                        idc = p_comb < 0.95
-                    if not np.count_nonzero(idc):
-                        idc = p_comb <= 1
-                    self.scalings_[k] = self.scalings_[k][:, idc]
+                self._fit_inverse(X, Xt, y)
+                Xt, self.lambda_ = self._learn_sparse_coef(X, Xt, snr=10)
+            if self.prune:
+                self._prune(Xt, y)
 
-                    self.rank_[k] = self.scalings_[k].shape[-1]
-                    # idc = np.argsort(p_comb)
-                    # Fs = tl.zeros(self.rank_[k])
-                    # for r in range(self.rank_[k]):
-                    #    Xt_sparse_pruned = np.take(Xt_sparse, idc[: r + 1], axis=k + 1)
-                    #    F = f_stat(Xt_sparse_pruned, y)
-                    #    Fs[r] = F
-                    # self.rank_[k] = np.argmax(Fs) + 1
-                    # idc = idc[: self.rank_[k]]
-                    # self.scalings_[k] = self.scalings_[k][:, idc]
             ## Orthonormalize
             for k in range(order):
                 self.scalings_[k], _ = tl.qr(self.scalings_[k], mode="reduced")
-
-            # TODO replace with drop columns
             Xt = self.transform(X)
             self._fit_inverse(X, Xt, y)
 
@@ -374,10 +338,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 u_old = tl.zeros((shape[k], shape[k]), dtype=X.dtype)
                 u_old[:, : old_scalings[k].shape[-1]] = old_scalings[k]
                 mode_update = tl.mean((u_old - u_new) ** 2)
-                update += mode_update
+                update += np.log(mode_update) / order
                 if self.keep_train_info:
                     self.train_info_["mode_update"][k].append(mode_update)
                     self.train_info_["mode_rank"][k].append(self.rank_[k])
+            update = np.exp(update)
 
             # Store iteration training information
             if self.keep_train_info:
@@ -484,6 +449,39 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             #    lambda_l = lambda_m
         return Xt_sparse, lambda_m
 
+    def _prune(self, Xt, y):
+        n_samples, *shape = Xt.shape
+        order = len(Xt.shape) - 1
+        _, y_int = np.unique(y, return_index=True)
+        # Calculate F statistic
+        Xt_flat = Xt.reshape((n_samples, -1))
+        F, p = f_classif(tl.to_numpy(Xt_flat), y)
+        p = tl.tensor(p.reshape(shape))
+
+        # Select discriminatory components
+        for k in range(order):
+            pk = tl.to_numpy(tl.unfold(p, k))
+            p_comb = np.zeros(pk.shape[0])
+            for r in range(self.rank_[k]):
+                p_comb[r] = scipy.stats.combine_pvalues(
+                    pk[r],
+                    method=self.combine_p,
+                ).pvalue
+
+            p_comb = np.nan_to_num(p_comb, nan=1)
+
+            new_rank = int(np.count_nonzero(p_comb < 0.05))
+            # new_rank = int(np.count_nonzero(p_comb < 0.05 / self.rank_[k]))
+            # if not new_rank:
+            #    new_rank = int(np.count_nonzero(p_comb < 0.50 / self.rank_[k]))
+            # if not new_rank:
+            #    new_rank = int(np.count_nonzero(p_comb < 0.95 / self.rank_[k]))
+            if not new_rank:
+                new_rank = self.rank_[k]
+            self.rank_[k] = new_rank
+            idc = np.argsort(p_comb)[: self.rank_[k]]
+            self.scalings_[k] = self.scalings_[k][:, idc]
+
     def transform(self, X, y=None):
         if not tl.is_tensor(X):
             X = tl.tensor(X, dtype=X.dtype)
@@ -509,7 +507,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         "The multilinear normal distribution: Introduction and some basic properties."
         Journal of Multivariate Analysis 113 (2013): 37-47.
         """
-        pass
+        raise NotImplemented
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
@@ -537,7 +535,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             hoda_params = dict()
 
         if self.keep_train_info:
-            self.train_info_ = dict(f_stat=[], mse=[], n_params=[])
+            self.train_info_ = dict(f_stat=[], mse=[], n_params=[], aic=[], bic=[])
 
         self.blocks_ = []
         n_blocks = self.n_blocks
@@ -557,15 +555,20 @@ class BTTDA(BaseEstimator, TransformerMixin):
             X_rec += X_approx
             if self.verbose:
                 print()
-
             if self.keep_train_info:
                 Xt = self.transform(X)
                 self.train_info_["f_stat"].append(f_stat(Xt, y))
                 self.train_info_["mse"].append(mse(X, X_rec))
-                self.train_info_["n_params"].append(Xt.shape[-1])
                 _, y_num = np.unique(y_num, return_inverse=True)
-                Xt_flat = Xt.reshape((n_samples, -1))
-                _, n_params = Xt_flat.shape
+                _, n_params = Xt.shape
+                self.train_info_["n_params"].append(n_params)
+                # lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
+                # lda.fit(Xt_flat, y)
+                # ll = log_loss(y, lda.predict_proba(Xt_flat))
+                # aic = 2 * n_params - 2 * ll
+                # self.train_info_["aic"].append(aic)
+                # bic = n_params * np.log(n_samples) - 2 * ll
+                # self.train_info_["bic"].append(bic)
 
         return self
 

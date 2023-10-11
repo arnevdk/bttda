@@ -41,6 +41,7 @@ def trunc_eigh(
     """
     if init is None:
         init = tl.eye(A.shape, dtype=A.dtype)
+    init = init[:, :rank]
     solver_params = solver_params or dict()
     if method == "lanczos":
         v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
@@ -68,15 +69,24 @@ def lanczos(A, B=None, rank=None, largest=True, **kwargs):
     if rank is None:
         rank = A.shape[0]
     if tl.get_backend() == "cupy":
-        which = "LA" if largest else "SA"
         if B is not None:
-            w, v = cupyx.scipy.sparse.linalg.eigsh(
-                pinvh(B) @ A, k=rank, return_eigenvectors=True, which=which, **kwargs
-            )
+            M = pinvh(B) @ A
         else:
-            w, v = cupyx.scipy.sparse.linalg.eigsh(
-                A, k=rank, return_eigenvectors=True, which=which, **kwargs
-            )
+            M = A
+        # if rank is None or rank == M.shape[0]:
+        #    w, v = cupy.linalg.eigh(M)
+        # else:
+        #    which = "LA" if largest else "SA"
+        #    w, v = cupyx.scipy.sparse.linalg.eigsh(
+        #        M, k=rank, return_eigenvectors=True, which=which, **kwargs
+        #    )
+        w, v = cupy.linalg.eigh(M)
+        if largest:
+            w = w[-rank:]
+            v = v[:, -rank:]
+        else:
+            w = w[:rank]
+            v = v[:, :rank]
     elif tl.get_backend() == "numpy":
         if largest:
             n = A.shape[0]
@@ -89,8 +99,7 @@ def lanczos(A, B=None, rank=None, largest=True, **kwargs):
     return v, w
 
 
-def lobpcg(A, init, B=None, rank=None, largest=True, **kwargs):
-    raise NotImplementedError  # TODO: largest magnitude
+def lobpcg(A, init, B=None, rank=None, **kwargs):
     if tl.get_backend() == "cupy":
         w, v = cupyx.scipy.sparse.linalg.lobpcg(A, init, B=B, **kwargs)
     elif tl.get_backend() == "numpy":
@@ -220,7 +229,8 @@ def ledoit_wolf_shrinkage(X, assume_centered=False, block_size=1000):
     # get final beta as the min between beta and delta
     # We do this to prevent shrinking more than "1", which would invert
     # the value of covariances
-    beta = min(beta, delta)
+    beta = tl.min(tl.tensor([beta, delta]))
     # finally get shrinkage
-    shrinkage = 0 if beta == 0 else beta / delta
+    # shrinkage = 0 if beta == 0 else beta / delta
+    shrinkage = beta / delta
     return shrinkage
