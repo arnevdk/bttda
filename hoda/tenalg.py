@@ -1,3 +1,4 @@
+import ipdb
 from sklearn.utils import safe_mask, safe_sqr
 
 try:
@@ -33,20 +34,23 @@ def solve(A, B):
 
 
 def trunc_eigh(
-    A, B=None, rank=None, largest=True, init=None, method="lanczos", solver_params=None
+    A,
+    B=None,
+    rank=None,
+    largest=True,
+    method="lanczos",
+    flip_sign=True,
+    **solver_params
 ):
     """
 
     SVD eigensolver can only be used if  B^-1@A is semi-positive definite
     """
-    if init is None:
-        init = tl.eye(A.shape, dtype=A.dtype)
-    init = init[:, :rank]
     solver_params = solver_params or dict()
     if method == "lanczos":
         v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
     elif method == "svd":
-        solver_params["flip_sign"] = True
+        solver_params["flip_sign"] = flip_sign
         solver_params.setdefault("method", "truncated_svd")
         if largest:
             solver_params["n_eigenvecs"] = rank
@@ -61,7 +65,13 @@ def trunc_eigh(
             v = v[:, -rank:]
 
     elif method == "lobpcg":
-        v, w = lobpcg(A, init, rank=rank, largest=largest, B=B)
+        init = solver_params.pop("init", tl.eye(A.shape[0], dtype=A.dtype))
+        init = init[:, :rank]
+        v, w = lobpcg(A, init, B=B, rank=rank, largest=largest, **solver_params)
+
+    if flip_sign:
+        sign = tl.sign(v[0, :])
+        v = v * sign[np.newaxis, :]
     return v, w
 
 
@@ -70,17 +80,15 @@ def lanczos(A, B=None, rank=None, largest=True, **kwargs):
         rank = A.shape[0]
     if tl.get_backend() == "cupy":
         if B is not None:
-            M = solve(B, A)
+            # https://discuss.tensorflow.org/t/compute-generalised-eigenvectors/12323
+            L = cupy.linalg.cholesky(B)
+            Y = cupyx.scipy.linalg.solve_triangular(L, A.T, lower=True).T
+            C = cupyx.scipy.linalg.solve_triangular(L, Y, lower=True)
         else:
-            M = A
-        # if rank is None or rank == M.shape[0]:
-        #    w, v = cupy.linalg.eigh(M)
-        # else:
-        #    which = "LA" if largest else "SA"
-        #    w, v = cupyx.scipy.sparse.linalg.eigsh(
-        #        M, k=rank, return_eigenvectors=True, which=which, **kwargs
-        #    )
-        w, v = cupy.linalg.eigh(M)
+            C = A
+        w, v = cupy.linalg.eigh(C)
+        if B is not None:
+            v = cupyx.scipy.linalg.solve_triangular(L.T, v, lower=False)
         if largest:
             w = w[-rank:]
             v = v[:, -rank:]
@@ -151,5 +159,14 @@ def fdtrc(dfn, dfd, x):
         return scipy.special.fdtrc(dfn, dfd, x)
     elif tl.get_backend() == "cupy":
         return cupyx.scipy.special.fdtrc(dfn, dfd, x)
+    else:
+        raise NotImplementedError
+
+
+def nan_to_num(*args, **kwargs):
+    if tl.get_backend() == "cupy":
+        return cupy.nan_to_num(*args, **kwargs)
+    elif tl.get_backend() == "numpy":
+        return np.nan_to_num(*args, **kwargs)
     else:
         raise NotImplementedError

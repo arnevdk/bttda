@@ -1,3 +1,4 @@
+import math
 import warnings
 
 import ipdb
@@ -186,8 +187,11 @@ def combine_pvalues(pvalues, axis=None, method="fisher", weights=None):
 
     """
     if method == "fisher":
+        shape = pvalues.shape
+        order = len(shape)
         statistic = -2 * tl.sum(tl.log(pvalues), axis=axis)
-        df = 2 * tl.prod(tl.tensor(pvalues.shape)[axis])
+        k = math.prod([shape[a] for a in range(order) if a in axis])
+        df = 2 * k
         pval = chdtrc(df, statistic)
         return (statistic, pval)
     #    elif method == 'pearson':

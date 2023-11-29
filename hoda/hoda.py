@@ -14,7 +14,8 @@ from tqdm.notebook import tqdm
 
 from hoda.gpu_opt import center, combine_pvalues, ledoit_wolf_shrinkage
 # from sklearn.feature_selection import f_classif
-from hoda.tenalg import fdtrc, maximum, pinvh, solve, toeplitz, trunc_eigh
+from hoda.tenalg import (fdtrc, maximum, nan_to_num, pinvh, solve, toeplitz,
+                         trunc_eigh)
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -114,12 +115,16 @@ def f_multiway(X, y, classes=None, class_counts=None):
 
 def f_oneway(X, y, classes=None, class_counts=None):
     n_samples, *shape = X.shape
+    order = len(shape)
     if classes is None or class_counts is None:
         classes, class_counts = np.unique(y, return_counts=True)
     n_classes = len(classes)
     ss_alldata = tl.sum(X**2, axis=0)
     sums_per_class, _ = center(X, y, classes)
-    sums_per_class *= tl.tensor(class_counts)[:, np.newaxis, np.newaxis]
+    # sums_per_class *= tl.tensor(class_counts)[:, np.newaxis, np.newaxis]
+    sums_per_class *= tl.tensor(
+        np.expand_dims(class_counts, axis=tuple(np.arange(1, order + 1)))
+    )
     square_of_sums_alldata = tl.sum(sums_per_class, axis=0) ** 2
     square_of_sums_per_class = sums_per_class**2
     sstot = ss_alldata - square_of_sums_alldata / n_samples
@@ -181,16 +186,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         max_iter=100,
         tol=1e-12,
         rank=None,
-        init="mlsvd",
-        shrinkage="oas",
+        init="svd",
+        shrinkage="lw",
         toeplitz=None,
         taper=False,
-        obj="tr",
+        obj="rt",
         solver="lanczos",
         lasso=False,
         prune=True,
         combine_pvalue="fisher",
-        combine_pvalue_corr="mfdr",
         prune_pvalue=0.5,
         verbose=False,
         solver_params=None,
@@ -211,7 +215,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.lasso = lasso
         self.prune = prune
         self.combine_pvalue = combine_pvalue
-        self.combine_pvalue_corr = combine_pvalue_corr
         self.prune_pvalue = prune_pvalue
 
     def fit(self, X, y):
@@ -278,11 +281,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     skip=k,
                     transpose=True,
                 )
+
+                if isinstance(self.shrinkage, tuple):
+                    shrinkage = self.shrinkage[k]
+                else:
+                    shrinkage = self.shrinkage
+
                 scatter_w, shrinkage = mode_scatter(
-                    X_centered_proj,
-                    k,
-                    assume_centered=True,
-                    shrinkage=self.shrinkage[k],
+                    X_centered_proj, k, assume_centered=True, shrinkage=shrinkage
                 )
                 if self.toeplitz is not None and k in self.toeplitz:
                     scatter_w = force_toeplitz(scatter_w, taper=self.taper)
@@ -301,10 +307,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 A, B, largest = OBJECTIVES[self.obj](
                     scatter_b, scatter_w, self.scalings_[k]
                 )
+                if self.solver == "lobpcg":
+                    solver_params["init"] = self.scalings_[k]
                 u, w = trunc_eigh(
                     A,
                     B,
-                    init=self.scalings_[k],
                     rank=self.rank_[k],
                     method=self.solver,
                     largest=largest,
@@ -474,46 +481,25 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         order = len(Xt.shape) - 1
         # Calculate F statistic
         F, p = f_oneway(Xt, y, classes, class_counts)
+        p = nan_to_num(p, nan=1)
 
         # Select discriminatory components
         for k in range(order):
             other_modes = tuple([kk for kk in range(order) if kk != k])
             _, p_comb = combine_pvalues(p, axis=other_modes, method=self.combine_pvalue)
-            # p_comb = np.nan_to_num(p_comb, nan=1)
-
-            # new_rank = int(np.count_nonzero(p_comb < 0.05))
-            # new_rank = int(np.count_nonzero(p_comb < 0.05 / self.rank_[k]))
-            # if not new_rank:
-            #    new_rank = int(np.count_nonzero(p_comb < 0.50 / self.rank_[k]))
-            # if not np.all(p_comb < self.prune_pvalue / self.rank_[k]):
-            #    if self.rank_[k] > 1:
-            #        new_rank = self.rank_[k] - 1
-            #    else:
-            #        new_rank = 1
-            # else:
-            #    new_rank = self.rank_[k]
-            # self.rank_[k] = new_rank
-            # idc = np.argsort(p_comb)[: self.rank_[k]]
-
             # Determine significance level
             alpha = self.prune_pvalue
-            # Correct for dependent tests in meta-analysis
-            if self.combine_pvalue_corr == "mfdr":
-                n_tests = p.size // p.shape[k]
-                alpha = alpha * (n_tests + 1) / (2 * n_tests)
-            elif self.combine_pvalue_corr is None:
-                pass
-            else:
-                raise NotImplemented
-            # Correct for multiple tests
-            alpha /= self.rank_[k]
-
+            alpha /= tl.sum(tl.tensor(shape))
             # Determine significantly discriminant components
-            idc = p_comb < (self.prune_pvalue) / self.rank_[k]
-            if not np.any(idc):
-                idc = [np.argmax(p_comb)]
-            self.scalings_[k] = self.scalings_[k][:, idc]
-            self.rank_[k] = self.scalings_[k].shape[1]
+            if not np.all(p_comb < alpha) and self.rank_[k] > 1:
+                self.rank_[k] -= 1
+                idc = np.argsort(-p_comb)
+                self.scalings_[k][:, idc[:-1]]
+            # idc = p_comb < alpha
+            # if not np.any(idc):
+            #    idc = [np.argmax(p_comb)]
+            # self.scalings_[k] = self.scalings_[k][:, idc]
+            # self.rank_[k] = self.scalings_[k].shape[1]
 
     def _sort_components(self, Xt, y, classes=None, class_counts=None):
         n_samples, *shape = Xt.shape

@@ -11,6 +11,7 @@ class MLSVD(BaseEstimator, TransformerMixin):
         self.rank = rank
 
     def fit(self, X, y=None):
+        X = tl.tensor(X.copy(), dtype=X.dtype)
         shape = X.shape[1:]
         order = len(shape)
         modes = self.modes
