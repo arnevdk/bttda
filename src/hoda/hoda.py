@@ -193,8 +193,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         solver="lanczos",
         lasso=False,
         prune=True,
-        combine_pvalue="fisher",
-        prune_pvalue=0.5,
         verbose=False,
         solver_params=None,
         keep_train_info=False,
@@ -213,8 +211,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.taper = taper
         self.lasso = lasso
         self.prune = prune
-        self.combine_pvalue = combine_pvalue
-        self.prune_pvalue = prune_pvalue
 
     def fit(self, X, y):
         # Setup
@@ -258,6 +254,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if self.keep_train_info:
             self.train_info_ = []
             self.mode_train_info_ = []
+        if self.prune:
+            snr = tl.tensor(
+                f_multiway(X, y), classes=self.classes_, class_counts=class_counts
+            )
 
         # Iteratively find projections
         if self.verbose:
@@ -336,7 +336,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 self._fit_inverse(X, Xt, y)
                 Xt, self.lambda_ = self._learn_sparse_coef(X, Xt, snr=10)
             if self.prune:
-                self._prune(Xt, y, self.classes_, class_counts)
+                self._prune(Xt, y, snr, self.classes_, class_counts)
 
             ## Orthonormalize
             for k in range(order):
@@ -475,41 +475,37 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             #    lambda_l = lambda_m
         return Xt_sparse, lambda_m
 
-    def _prune(self, Xt, y, classes=None, class_counts=None):
+    def _prune(self, Xt, y, snr, classes=None, class_counts=None):
         n_samples, *shape = Xt.shape
         order = len(Xt.shape) - 1
-        # Calculate F statistic
-        F, p = f_oneway(Xt, y, classes, class_counts)
-        p = nan_to_num(p, nan=1)
-
-        # Select discriminatory components
         for k in range(order):
-            other_modes = tuple([kk for kk in range(order) if kk != k])
-            _, p_comb = combine_pvalues(p, axis=other_modes, method=self.combine_pvalue)
-            # Determine significance level
-            alpha = self.prune_pvalue
-            alpha /= tl.sum(tl.tensor(shape))
-            # Determine significantly discriminant components
-            if not np.all(p_comb < alpha) and self.rank_[k] > 1:
-                self.rank_[k] -= 1
-                idc = np.argsort(-p_comb)
-                self.scalings_[k][:, idc[:-1]]
-            # idc = p_comb < alpha
-            # if not np.any(idc):
-            #    idc = [np.argmax(p_comb)]
-            # self.scalings_[k] = self.scalings_[k][:, idc]
-            # self.rank_[k] = self.scalings_[k].shape[1]
+            mode_F = tl.zeros(shape[k], dtype=Xt.dtype)
+            for r in range(shape[k]):
+                mode_F[r] = f_multiway(
+                    np.take(Xt, r, axis=k + 1),
+                    y,
+                    classes=classes,
+                    class_counts=class_counts,
+                )
+            idc = mode_F > snr
+            if not np.any(idc):
+                idc = [np.argmax(mode_F)]
+            self.scalings_[k] = self.scalings_[k][:, idc]
+            self.rank_[k] = self.scalings_[k].shape[1]
 
     def _sort_components(self, Xt, y, classes=None, class_counts=None):
         n_samples, *shape = Xt.shape
         order = len(Xt.shape) - 1
-        # Calculate F statistic
-        F, p = f_oneway(Xt, y, classes, class_counts)
-        # Determine mode statistic
         for k in range(order):
-            other_modes = tuple([kk for kk in range(order) if kk != k])
-            _, p_comb = combine_pvalues(p, axis=other_modes, method=self.combine_pvalue)
-            sort_idc = np.argsort(p_comb)
+            mode_F = tl.zeros(shape[k], dtype=Xt.dtype)
+            for r in range(shape[k]):
+                mode_F[r] = f_multiway(
+                    np.take(Xt, r, axis=k + 1),
+                    y,
+                    classes=classes,
+                    class_counts=class_counts,
+                )
+            sort_idc = np.argsort(-mode_F)
             self.scalings_[k] = self.scalings_[k][:, sort_idc]
             self.aps_[k] = self.aps_[k][:, sort_idc]
 
@@ -545,7 +541,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         n_blocks=None,
-        var_thresh=1,
         hoda_params=None,
         deflate_transform=False,
         verbose=False,
@@ -553,7 +548,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
     ):
         self.hoda_params = hoda_params
         self.n_blocks = n_blocks
-        self.var_thresh = var_thresh
         self.verbose = verbose
         self.keep_train_info = keep_train_info
         self.deflate_transform = deflate_transform
@@ -602,8 +596,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 Xt_block = block.transform(X)
                 row["f_stat"] = tl.to_numpy(f_multiway(Xt_block, y))
                 self.train_info_.append(row)
-            if explained >= self.var_thresh:
-                break
         if self.keep_train_info:
             self.train_info_ = pd.DataFrame(self.train_info_)
             self.train_info_.set_index(["block"], inplace=True)
@@ -623,3 +615,9 @@ class BTTDA(BaseEstimator, TransformerMixin):
             Xt.append(Xtb.reshape(n_samples, -1))
         Xt = tl.concatenate(Xt, axis=1)
         return Xt
+
+    def n_features(self, n_blocks, mode=None):
+        if mode is None:
+            return sum([math.prod(b.rank_) for b in self.blocks_[:n_blocks]])
+        else:
+            return sum([b.rank_[mode] for b in self.blocks_[:n_blocks]])
