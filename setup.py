@@ -7,5 +7,18 @@ setup(
     url="https://gitlab.kuleuven.be/compneuro/hoda-bci",
     author="Arne Van Den Kerchove",
     author_email="arne.vandenkerchove@kuleuven.be",
-    packages=["hoda"],
+    install_requires=[
+        "pyyaml<5.4",
+        "tensorly",
+        "tqdm",
+        "statsmodels",
+    ],
+    extras_require={
+        "notebook": [
+            "numpy<1.24",
+            "moabb",
+            "jupyter",
+            "toeplitzlda",
+        ]
+    },
 )
