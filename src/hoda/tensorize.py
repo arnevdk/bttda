@@ -1,4 +1,3 @@
-import ipdb
 import numpy as np
 import scipy.linalg
 from sklearn.base import TransformerMixin
@@ -18,7 +17,7 @@ def hankel_tensor(X, y=None):
 def hankel_tensor_inv(Xh, y=None):
     X1 = Xh[:, :, 0, :]
     X2 = Xh[:, :, -1, :]
-    if X2.shape[-1] % 2:
+    if Xh.shape[-1] == Xh.shape[-2]:
         X2 = X2[:, :, 1:]
     return np.concatenate((X1, X2), axis=-1)
 

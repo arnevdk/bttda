@@ -8,13 +8,13 @@ setup(
     author="Arne Van Den Kerchove",
     author_email="arne.vandenkerchove@kuleuven.be",
     install_requires=[
-        "pyyaml<5.4",
         "tensorly",
         "tqdm",
         "statsmodels",
     ],
     extras_require={
         "notebook": [
+            "pyyaml<5.4",
             "numpy<1.24",
             "moabb",
             "jupyter",
