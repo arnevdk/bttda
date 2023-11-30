@@ -481,8 +481,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         for k in range(order):
             mode_F = tl.zeros(shape[k], dtype=Xt.dtype)
             for r in range(shape[k]):
+                mode_slice = np.take(Xt, r, axis=k + 1)
                 mode_F[r] = f_multiway(
-                    np.take(Xt, r, axis=k + 1),
+                    mode_slice,
                     y,
                     classes=classes,
                     class_counts=class_counts,
@@ -592,7 +593,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 row["block"] = self.n_blocks_ - 1
                 row["mse"] = tl.to_numpy(mse(X, X_rec))
                 row["explained"] = float(explained)
-                row["f_stat_defl"] = tl.to_numpy(f_multiway(Xt_block, y))
                 Xt_block = block.transform(X)
                 row["f_stat"] = tl.to_numpy(f_multiway(Xt_block, y))
                 self.train_info_.append(row)
@@ -616,7 +616,9 @@ class BTTDA(BaseEstimator, TransformerMixin):
         Xt = tl.concatenate(Xt, axis=1)
         return Xt
 
-    def n_features(self, n_blocks, mode=None):
+    def n_features(self, n_blocks=None, mode=None):
+        if n_blocks is None:
+            n_blocks = len(self.blocks_)
         if mode is None:
             return sum([math.prod(b.rank_) for b in self.blocks_[:n_blocks]])
         else:

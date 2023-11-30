@@ -19,6 +19,7 @@ setup(
             "moabb",
             "jupyter",
             "toeplitzlda",
+            "seaborn",
         ]
     },
 )

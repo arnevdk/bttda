@@ -20,7 +20,7 @@ def center(X, y, classes=None):
         classes = np.unique(y)
     n_classes = len(classes)
 
-    means = tl.zeros((n_classes, *shape), dtype=X.dtype)
+    means = tl.zeros((n_classes, *shape), X.dtype)
     if tl.get_backend() == "cupy":
         X_centered = tl.zeros((n_classes, *X.shape))
         full_nan = cupy.full_like(X, cupy.nan)
