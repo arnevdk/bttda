@@ -11,10 +11,10 @@ from sklearn.metrics import log_loss
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
+import hoda.backend as backend
 from hoda.gpu_opt import center, combine_pvalues, ledoit_wolf_shrinkage
+
 # from sklearn.feature_selection import f_classif
-from hoda.tenalg import (fdtrc, maximum, nan_to_num, pinvh, solve, toeplitz,
-                         trunc_eigh)
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -137,7 +137,7 @@ def f_oneway(X, y, classes=None, class_counts=None):
     msb = ssbn / dfbn
     msw = sswn / dfwn
     f = msb / msw
-    prob = fdtrc(dfbn, dfwn, f)
+    prob = backend.scipy.special.fdtrc(dfbn, dfwn, f)
     return f, prob
 
 
@@ -172,11 +172,59 @@ def force_toeplitz(A, taper=False):
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper
-    return toeplitz(toep)
+    return backend.scipy.linalg.toeplitz(toep)
 
 
 def mse(A, B):
     return float(tl.abs(tl.mean((B - A) ** 2)))
+
+
+def trunc_eigh(
+    A,
+    B=None,
+    rank=None,
+    largest=True,
+    method="lanczos",
+    flip_sign=True,
+    **solver_params,
+):
+    """
+
+    SVD eigensolver can only be used if  B^-1@A is semi-positive definite
+    """
+    solver_params = solver_params or dict()
+    if method == "lanczos":
+        v, w = backend.scipy.lanczos(
+            A, B=B, rank=rank, largest=largest, **solver_params
+        )
+    elif method == "svd":
+        solver_params["flip_sign"] = flip_sign
+        solver_params.setdefault("method", "truncated_svd")
+        if largest:
+            solver_params["n_eigenvecs"] = rank
+        else:
+            solver_params["n_eigenvecs"] = None
+        if B is None:
+            v, w, _ = tl.tenalg.svd_interface(A, **solver_params)
+        else:
+            v, w, _ = tl.tenalg.svd_interface(
+                backend.np.linalg.solve(B @ A), **solver_params
+            )
+        if not largest:
+            w = w[-rank:]
+            v = v[:, -rank:]
+
+    elif method == "lobpcg":
+        init = solver_params.pop("init", tl.eye(A.shape[0], dtype=A.dtype))
+        init = init[:, :rank]
+        v, w = backend.scipy.sparse.linalg.lobpcg(
+            A, init, B=B, rank=rank, largest=largest, **solver_params
+        )
+
+    if flip_sign:
+        sign = tl.sign(v[0, :])
+        v = v * sign[np.newaxis, :]
+    return v, w
 
 
 class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
@@ -222,8 +270,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.shape_ = shape
         order = len(shape)
         if self.rank is None:
-            # self.rank_ = shape.copy()
-            self.rank_ = [min(shape) for _ in range(order)]
+            self.rank_ = shape.copy()
+            # self.rank_ = [min(shape) for _ in range(order)]
         else:
             self.rank_ = self.rank.copy()
 
@@ -440,7 +488,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             cov_l = scatter_l / (math.prod(core.shape) / core.shape[k + 1] - 1)
             self.cov_l_[k] = cov_l
             # Haufe method
-            self.aps_[k] = self.cov_w_[k] @ solve(self.cov_l_[k], self.scalings_[k].T).T
+            self.aps_[k] = (
+                self.cov_w_[k]
+                @ backend.np.linalg.solve(self.cov_l_[k], self.scalings_[k].T).T
+            )
 
     def _learn_sparse_coef(self, X, Xt, snr=5):
         se = tl.sum((X - self.inv_transform(Xt)) ** 2)

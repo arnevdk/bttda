@@ -2,8 +2,7 @@ import unittest
 
 import numpy as np
 import tensorly as tl
-from hoda.hoda import HODA
-from hoda.tenalg import trunc_eigh
+from hoda.hoda import HODA, trunc_eigh
 
 
 class TestAlgorithmIntegration(unittest.TestCase):
