@@ -94,23 +94,33 @@ OBJECTIVES = dict(
 )
 
 
+def norm_fro(A):
+    return tl.sqrt(tl.sum(A**2))
+
+
 def f_multiway(X, y, classes=None, class_counts=None):
-    X = tl.tensor(X, dtype=X.dtype)
     n_samples, *shape = X.shape
+    X = tl.tensor(X, dtype=X.dtype)
     if classes is None or class_counts is None:
         classes, class_counts = np.unique(y, return_counts=True)
-
+    n_classes = len(classes)
     # Calculate class means, overall class mean and center data
     means, X_centered = center(X, y, classes)
     class_mean = tl.mean(means, axis=0)
-    scatter_w = tl.norm(X_centered, order=2) ** 2
+    scatter_w = norm_fro(X_centered) ** 2
     # Calculate between class scatter
     scatter_b = 0
     for ci, c in enumerate(classes):
-        scatter_b += class_counts[ci] * tl.norm(means[ci] - class_mean, order=2) ** 2
-    # Calculate f score
+        mean_centered = means[ci] - class_mean
+        scatter_b += class_counts[ci] * norm_fro(mean_centered) ** 2
+    # Calculate Fisher ratio
     F = float(scatter_b / scatter_w)
-    return F
+    # Calculate p-value
+    n_features = math.prod(shape)
+    dfbn = n_features
+    dfwn = n_samples - n_features
+    p = backend.scipy.special.fdtrc(dfbn, dfwn, F)
+    return float(F), float(p)
 
 
 def f_oneway(X, y, classes=None, class_counts=None):
@@ -137,9 +147,9 @@ def f_oneway(X, y, classes=None, class_counts=None):
     dfwn = n_samples - n_classes
     msb = ssbn / dfbn
     msw = sswn / dfwn
-    f = msb / msw
-    prob = backend.scipy.special.fdtrc(dfbn, dfwn, f)
-    return f, prob
+    F = msb / msw
+    p = backend.scipy.special.fdtrc(dfbn, dfwn, F)
+    return F, p
 
 
 def mode_scatter(X, k, weights=None, shrinkage=0, assume_centered=False):
@@ -244,7 +254,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         verbose=False,
         solver_params=None,
         keep_train_info=False,
-        orth_inv=True,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -259,7 +268,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.keep_train_info = keep_train_info
         self.taper = taper
         self.prune = prune
-        self.orth_inv = orth_inv
 
     def fit(self, X, y):
         # Setup
@@ -291,6 +299,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if self.verbose:
             print("Initializing factors...")
         self.scalings_ = self._init(X, shape)
+        scatter_X = [None] * order
+        for k in range(order):
+            Xk = tl.unfold(X, k + 1)
+            scatter_X[k] = Xk @ Xk.T
 
         # Initialize iterative algorithm
         for k in range(order):
@@ -302,9 +314,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.train_info_ = []
         self.mode_train_info_ = []
         if self.prune:
-            snr = tl.tensor(
-                f_multiway(X, y), classes=self.classes_, class_counts=class_counts
-            )
+            snr, _ = f_multiway(X, y, classes=self.classes_, class_counts=class_counts)
 
         # Iteratively find projections
         if self.verbose:
@@ -362,15 +372,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     largest=largest,
                     **solver_params,
                 )
-                if self.orth_inv:
-                    Xk = tl.unfold(X, k + 1)
-                    u, _ = trunc_eigh(
-                        u @ u.T @ (Xk @ Xk.T) @ u @ u.T,
-                        rank=self.rank_[k],
-                        method=self.solver,
-                        largest=largest,
-                        **solver_params,
-                    )
+                u, _ = trunc_eigh(
+                    u @ u.T @ (scatter_X[k]) @ u @ u.T,
+                    rank=self.rank_[k],
+                    method=self.solver,
+                    largest=largest,
+                    **solver_params,
+                )
                 u, _ = tl.qr(u, mode="reduced")
                 sign = tl.sign(u[0, :])
                 u = u * sign[np.newaxis, :]
@@ -397,7 +405,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 mode_rows[k]["update"] = float(tl.to_numpy(mode_update))
             update = np.exp(update)
 
-            if self.prune and len(self.train_info_) and update < self.tol:
+            if self.prune and len(self.train_info_):  # and update < self.tol:
                 Xt = self.transform(X)
                 old_rank = self.rank_.copy()
                 self._prune(Xt, y, snr, self.classes_, class_counts)
@@ -414,9 +422,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             row["iteration"] = self.iter_
             if self.keep_train_info:
                 self._fit_inverse(X, Xt, y)
-                row["f_stat"] = tl.to_numpy(
-                    f_multiway(Xt, y, self.classes_, class_counts)
-                )
+                F, p = f_multiway(Xt, y, self.classes_, class_counts)
+                row["F"] = float(tl.to_numpy(F))
+                row["p"] = float(tl.to_numpy(p))
                 X_rec = self.inv_transform(Xt)
                 row["mse"] = tl.to_numpy(mse(X, X_rec))
 
@@ -430,6 +438,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             if update < self.tol:
                 break
         self._fit_inverse(X, Xt, y)
+        self._sort_components(Xt, y, classes=self.classes_, class_counts=class_counts)
         # Convert train_info to dataframe
         self.train_info_ = pd.DataFrame(self.train_info_)
         self.train_info_.set_index(["iteration"], inplace=True)
@@ -538,7 +547,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             mode_F = tl.zeros(shape[k], dtype=Xt.dtype)
             for r in range(shape[k]):
                 mode_slice = np.take(Xt, r, axis=k + 1)
-                mode_F[r] = f_multiway(
+                mode_F[r], _ = f_multiway(
                     mode_slice,
                     y,
                     classes=classes,
@@ -549,25 +558,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 idc = np.argsort(-mode_F)
                 self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_[k]]]
 
-            # if not np.all(mode_F > snr) and self.rank_[k] > 1:
-            #    self.rank_[k] //= 2
-            #    idc = np.argsort(-mode_F)
-            #    self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_[k]]]
-
-            # idc = mode_F > snr
-            # if not np.any(idc):
-            #    idc = [np.argmax(mode_F)]
-
-            # self.scalings_[k] = self.scalings_[k][:, idc]
-            # self.rank_[k] = self.scalings_[k].shape[1]
-
     def _sort_components(self, Xt, y, classes=None, class_counts=None):
         n_samples, *shape = Xt.shape
         order = len(Xt.shape) - 1
         for k in range(order):
             mode_F = tl.zeros(shape[k], dtype=Xt.dtype)
             for r in range(shape[k]):
-                mode_F[r] = f_multiway(
+                mode_F[r], _ = f_multiway(
                     np.take(Xt, r, axis=k + 1),
                     y,
                     classes=classes,
