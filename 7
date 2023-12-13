@@ -1,6 +1,5 @@
 import numpy as np
 import scipy.linalg
-from mne.baseline import rescale
 from mne.time_frequency import tfr_array_morlet
 from sklearn.base import TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
@@ -24,38 +23,10 @@ def hankel_tensor_inv(Xh, y=None):
     return np.concatenate((X1, X2), axis=-1)
 
 
-def stf_tensor(
-    X,
-    sfreq,
-    tmin,
-    y=None,
-    morlet_params=None,
-    baseline_params=None,
-):
-    # TFR
-    if morlet_params is None:
-        morlet_params = dict()
+def stf_tensor(X, sfreq, freqs, y=None, **morlet_params):
     morlet_params["output"] = "power"
-    morlet_params.setdefault("freqs", np.linspace(0.5, 16, 16))
-    morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
-    Xt = tfr_array_morlet(X, sfreq, **morlet_params)
-
-    # Baseline
-    if baseline_params is None:
-        baseline_params = dict()
-    baseline_params.setdefault("baseline", (-0.15, -0.05))
-    baseline_params.setdefault("mode", "logratio")
-    n_times = X.shape[-1]
-    tmax = n_times / sfreq + tmin
-    times = np.linspace(tmin, tmax, n_times)
-    Xt = rescale(Xt, times, **baseline_params)
+    Xt = tfr_array_morlet(X, sfreq, freqs, **morlet_params)
     return Xt
-
-
-def crop(X, begin, end, sfreq, tmin):
-    begin = int((begin - tmin) * sfreq)
-    end = int((end - tmin) * sfreq)
-    return X[..., begin:end]
 
 
 class HankelTensor(FunctionTransformer):
@@ -66,6 +37,6 @@ class HankelTensor(FunctionTransformer):
 
 class STFTensor(TransformerMixin):
     def __init__(**params):
-        params["func"] = stf_tensor
+        params['func'] = stf_tensor
         super().__init__(**params)
         raise NotImplementedError
