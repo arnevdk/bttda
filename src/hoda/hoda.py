@@ -6,13 +6,18 @@ import pandas as pd
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
+from sklearn.base import (BaseEstimator, ClassifierMixin, TransformerMixin,
+                          clone)
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.feature_selection import SelectFwe
 from sklearn.metrics import log_loss
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
 import hoda.backend as backend
+from hoda.classification import Vectorize
 from hoda.gpu_opt import center, combine_pvalues, ledoit_wolf_shrinkage
 
 # from sklearn.feature_selection import f_classif
@@ -45,7 +50,14 @@ def obj_tr(scatter_b, scatter_w, u, psi=1):
     Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
     """
     phi = tl.trace(u.T @ scatter_b @ u) / tl.trace(u.T @ scatter_w @ u)
-    return scatter_b - psi * phi * scatter_w, None, True
+    # _, phi = trunc_eigh(
+    #    backend.np.linalg.pinv(scatter_w) @ scatter_b,
+    #    rank=1,
+    #    method="lanczos",
+    #    largest=True,
+    # )
+    A = scatter_b - psi * phi * scatter_w
+    return A, None, True
 
 
 def obj_lfl(scatter_b, scatter_w, u):
@@ -97,7 +109,7 @@ def norm_fro(A):
     return tl.sqrt(tl.sum(A**2))
 
 
-def f_multiway(X, y, classes=None, class_counts=None):
+def f_multiway(X, y, classes=None, class_counts=None, method="tr"):
     n_samples, *shape = X.shape
     X = tl.tensor(X, dtype=X.dtype)
     if classes is None or class_counts is None:
@@ -106,20 +118,29 @@ def f_multiway(X, y, classes=None, class_counts=None):
     # Calculate class means, overall class mean and center data
     means, X_centered = center(X, y, classes)
     class_mean = tl.mean(means, axis=0)
-    scatter_w = norm_fro(X_centered) ** 2
-    # Calculate between class scatter
-    scatter_b = 0
-    for ci, c in enumerate(classes):
-        mean_centered = means[ci] - class_mean
-        scatter_b += class_counts[ci] * norm_fro(mean_centered) ** 2
-    # Calculate Fisher ratio
-    F = float(scatter_b / scatter_w)
-    # Calculate p-value
-    n_features = math.prod(shape)
-    dfbn = n_features
-    dfwn = n_samples - n_features
-    p = backend.scipy.special.fdtrc(dfbn, dfwn, F)
-    return float(F), float(p)
+    if method == "tr":
+        tr_scatter_w = norm_fro(X_centered) ** 2
+        tr_scatter_b = 0
+        for ci, c in enumerate(classes):
+            mean_centered = means[ci] - class_mean
+            tr_scatter_b += class_counts[ci] * norm_fro(mean_centered) ** 2
+        # Calculate Fisher ratio
+        F = tr_scatter_b / tr_scatter_w
+    elif method == "rt":
+        X_centered_flat = tl.unfold(X_centered, 0)
+
+        scatter_w, _ = mode_scatter(
+            X_centered_flat, 0, assume_centered=True, shrinkage="lw"
+        )
+        means_flat = tl.unfold(means, 0)
+        scatter_b, _ = mode_scatter(
+            means_flat, 0, assume_centered=False, shrinkage="lw"
+        )
+        _, w = trunc_eigh(scatter_b, scatter_w, rank=None, method="lanczos")
+        F = tl.sum(w)
+    else:
+        raise AttributeError
+    return F, 0
 
 
 def f_oneway(X, y, classes=None, class_counts=None):
@@ -186,7 +207,15 @@ def force_toeplitz(A, taper=False):
 
 
 def mse(A, B):
-    return float(tl.abs(tl.mean((B - A) ** 2)))
+    return tl.abs(tl.mean((B - A) ** 2))
+
+
+def bic(n, k, ll):
+    return tl.log(n) * k - 2 * ll
+
+
+def aic(k, ll):
+    return 2 * k - 2 * ll
 
 
 def trunc_eigh(
@@ -240,8 +269,8 @@ def trunc_eigh(
 class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def __init__(
         self,
-        max_iter=100,
-        tol=1e-12,
+        max_iter=256,
+        tol=1e-8,
         rank=None,
         init="svd",
         shrinkage="lw",
@@ -277,11 +306,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         n_samples, *shape = X.shape
         self.shape_ = shape
         order = len(shape)
-        if self.rank is None:
-            # self.rank_ = shape.copy()
-            self.rank_ = [min(shape) for _ in range(order)]
-        else:
-            self.rank_ = self.rank.copy()
 
         # Initialize solver
         if self.obj not in OBJECTIVES.keys():
@@ -297,23 +321,19 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Initialize projections
         if self.verbose:
             print("Initializing factors...")
-        self.scalings_ = self._init(X, shape)
+        self.scalings_ = self._init(X, self.rank)
         scatter_X = [None] * order
         for k in range(order):
             Xk = tl.unfold(X, k + 1)
             scatter_X[k] = Xk @ Xk.T
 
         # Initialize iterative algorithm
-        for k in range(order):
-            self.scalings_[k] = self.scalings_[k][:, : self.rank_[k]]
         self.scatter_w_ = [None] * order
         self.scatter_b_ = [None] * order
 
         # Initialze training information
         self.train_info_ = []
         self.mode_train_info_ = []
-        if self.prune:
-            snr, _ = f_multiway(X, y, classes=self.classes_, class_counts=class_counts)
 
         # Iteratively find projections
         if self.verbose:
@@ -366,15 +386,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 u, w = trunc_eigh(
                     A,
                     B,
-                    rank=self.rank_[k],
+                    rank=self.rank_(k),
                     method=self.solver,
                     largest=largest,
                     **solver_params,
                 )
                 u, w = trunc_eigh(
                     u @ u.T @ (scatter_X[k]) @ u @ u.T,
-                    rank=self.rank_[k],
-                    method="svd",
+                    rank=self.rank_(k),
+                    method="lanczos",
                     largest=largest,
                     **solver_params,
                 )
@@ -385,9 +405,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 # Store mode training information
                 if self.keep_train_info:
                     obj = tl.sum(w)
-                    mode_rows[k]["objective"] = float(obj)
-                    mode_rows[k][f"shrinkage"] = float(shrinkage)
-                    mode_rows[k]["rank"] = tl.to_numpy(self.rank_[k])
+                    mode_rows[k]["objective"] = obj
+                    mode_rows[k]["shrinkage"] = shrinkage
+                    mode_rows[k]["rank"] = self.rank_(k)
                 new_scalings[k] = u
 
             # Update scalings
@@ -404,56 +424,61 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 else:
                     mode_update = tl.mean((u_old - u_new) ** 2)
                 update += np.log(mode_update) / order
-                mode_rows[k]["update"] = float(tl.to_numpy(mode_update))
+                mode_rows[k]["update"] = mode_update
             update = np.exp(update)
 
             if self.prune and len(self.train_info_) and update < self.tol:
                 Xt = self.transform(X)
                 old_rank = self.rank_.copy()
-                self._prune(Xt, y, snr, self.classes_, class_counts)
+                self._prune(Xt, y, self.classes_, class_counts)
                 for k in range(order):
-                    mode_rows[k]["rank"] = tl.to_numpy(self.rank_[k])
-                    if self.rank_[k] != old_rank[k]:
+                    mode_rows[k]["rank"] = self.rank_(k)
+                    if self.rank_(k) != old_rank[k]:
                         update = np.inf
                         mode_rows[k]["update"] = np.inf
 
             Xt = self.transform(X)
 
             # Store iteration training information
-            row = dict()
-            row["iteration"] = self.iter_
+            info_row = dict()
             if self.keep_train_info:
-                self._fit_inverse(X, Xt, y)
-                F, p = f_multiway(Xt, y, self.classes_, class_counts)
-                row["F"] = float(tl.to_numpy(F))
-                row["p"] = float(tl.to_numpy(p))
-                X_rec = self.inv_transform(Xt)
-                row["mse"] = tl.to_numpy(mse(X, X_rec))
+                info_row = self._calc_train_info(X, Xt, y, class_counts)
+            info_row["iteration"] = self.iter_
+            info_row["update"] = update
+            self.train_info_.append(info_row)
 
             self.mode_train_info_ += mode_rows
-            row["update"] = float(tl.to_numpy(update))
-            self.train_info_.append(row)
 
-            for k in range(order):
-                assert self.scalings_[k].shape[-1] == self.rank_[k]
             ## Check convergence
             if update < self.tol:
                 break
         self._fit_inverse(X, Xt, y)
-        # self._sort_components(Xt, y, classes=self.classes_, class_counts=class_counts)
         # Convert train_info to dataframe
-        self.train_info_ = pd.DataFrame(self.train_info_)
+        self.train_info_ = pd.DataFrame(self.train_info_).astype(float)
         self.train_info_.set_index(["iteration"], inplace=True)
-        self.mode_train_info_ = pd.DataFrame(self.mode_train_info_)
+        self.mode_train_info_ = pd.DataFrame(self.mode_train_info_).astype(float)
         self.mode_train_info_.set_index(["iteration", "mode"], inplace=True)
         if self.verbose:
-            print(f"Fitted Tucker model of rank {self.rank_} ...")
+            print(f"Fitted Tucker model of rank {self.ml_rank_} ...")
 
         return self
+
+    def rank_(self, k):
+        return self.scalings_[k].shape[-1]
+
+    @property
+    def ml_rank_(self):
+        order = len(self.scalings_)
+        return tuple([self.rank_(k) for k in range(order)])
 
     def _init(self, X, rank):
         _, *shape = X.shape
         order = len(shape)
+        if rank is None:
+            rank = [min(shape) for _ in range(order)]
+        elif isinstance(self.rank, int):
+            rank = [self.rank for _ in range(order)]
+
         scalings = [None] * order
         if self.init == "mlsvd":
             modes = tuple(range(1, order + 1))
@@ -489,60 +514,23 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def _fit_inverse(self, X, core, y):
         n_samples, *shape = X.shape
         order = len(shape)
-        self.cov_w_ = [None] * order
-        self.cov_l_ = []
-        self.aps_ = [None] * len(self.scalings_)
-        for k in range(order):
-            self.cov_l_.append(tl.eye(self.rank_[k]))
-
+        self.aps_ = [None] * order
+        self.cov_l_ = [None] * order
+        self.cov_ = [None] * order
         _, core_centered = center(core, y, self.classes_)
         for k in range(order):
-            # self.cov_w_[k] = self.scatter_w_[k] / (
-            #    math.prod(core.shape) / core.shape[k + 1] - 1
-            # )
-            scatter, _ = mode_scatter(X, k, assume_centered=False, shrinkage="lw")
-            self.cov_w_[k] = scatter / (math.prod(X.shape) / X.shape[k + 1] - 1)
-            scatter_l, _ = mode_scatter(core_centered, k, assume_centered=True)
-            cov_l = scatter_l / (math.prod(core.shape) / core.shape[k + 1] - 1)
-            self.cov_l_[k] = cov_l
+            scatter_l, _ = mode_scatter(
+                core_centered, k, assume_centered=True, shrinkage="lw"
+            )
+            self.cov_l_[k] = scatter_l / (math.prod(core.shape) / core.shape[k + 1] - 1)
+            self.cov_[k] = self.scatter_w_[k] / (
+                math.prod(core.shape) / core.shape[k + 1] - 1
+            )
             # Haufe method
             self.aps_[k] = (
-                self.cov_w_[k]
+                self.cov_[k]
                 @ backend.np.linalg.solve(self.cov_l_[k], self.scalings_[k].T).T
             )
-
-    def _learn_sparse_coef(self, X, Xt, snr=5):
-        se = tl.sum((X - self.inv_transform(Xt)) ** 2)
-        epsilon = 10 ** (-snr / 10) * tl.sum(X**2)
-        tol = 1e-4
-        lambda_l = tl.min(tl.abs(Xt))
-        lambda_h = tl.max(tl.abs(Xt))
-        sign = tl.sign(Xt)
-        abs_Xt = tl.abs(Xt)
-        zeros = tl.zeros_like(Xt)
-        # lambda_h = tl.min(tl.abs(Xt))
-        # while True:
-        #    Xt_sparse = tl.sign(Xt) * maximum(tl.abs(Xt) - lambda_h, tl.zeros_like(Xt))0
-        #    se = tl.sum((X - self.inv_transform(Xt_sparse)) ** 2)
-        #    if se >= epsilon:
-        #        break
-        #    else:
-        #        lambda_l = lambda_h
-        #        lambda_h = 2 * lambda_h
-        tol_iter = int(math.log(1 / tol, 2))
-        for i in range(tol_iter):
-            lambda_m = (lambda_l + lambda_h) / 2
-            Xt_sparse = sign * maximum(abs_Xt - lambda_m, zeros)
-            se = tl.sum((X - self.inv_transform(Xt_sparse)) ** 2)
-            # Faster than if-statement on GPU
-            se_gt_eps = se >= epsilon
-            lambda_h = se_gt_eps * lambda_m + (1 - se_gt_eps) * lambda_h
-            lambda_l = se_gt_eps * lambda_l + (1 - se_gt_eps) * lambda_m
-            # if se >= epsilon:
-            #    lambda_h = lambda_m
-            # else:
-            #    lambda_l = lambda_m
-        return Xt_sparse, lambda_m
 
     # def _prune(self, Xt, y, snr, classes=None, class_counts=None):
     #    n_samples, *shape = Xt.shape
@@ -569,50 +557,95 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     #        # for k in range(order):
     #        #    new_rank = int(max(new_rank, np.count_nonzero(mode_F[k] > snr)))
     #        for k in range(order):
-    #            # self.rank_[k] = new_rank
+    #            # self.rank_(k) = new_rank
     #            idc = np.argsort(-mode_F[k])
-    #            # self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_[k]]]
-    #            self.rank_[k] -= 1
-    #            self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_[k]]]
+    #            # self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_(k)]]
+    #            self.rank_(k) -= 1
+    #            self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_(k)]]
 
-    def _prune(self, Xt, y, _, classes=None, class_counts=None):
+    # def _prune(self, Xt, y, classes=None, class_counts=None):
+    #    n_samples, *shape = Xt.shape
+    #    order = len(Xt.shape) - 1
+    #    # Calculate F statistic
+    #    F, p = f_oneway(Xt, y, classes, class_counts)
+    #    # Determine significance level
+
+    #    new_rank = 1
+    #    for k in range(order):
+    #        other_modes = tuple([kk for kk in range(order) if kk != k])
+    #        _, p_comb = combine_pvalues(p, axis=other_modes, method="fisher")
+    #        alpha = 0.05 / shape[k]
+    #        new_rank = int(max(new_rank, backend.np.count_nonzero((p_comb < alpha))))
+    #        self.scalings_[k] = self.scalings_[k][:, backend.np.argsort(p_comb)]
+    #    for k in range(order):
+    #        self.scalings_[k] = self.scalings_[k][:, :new_rank]
+
+    def _prune(self, Xt, y, classes=None, class_counts=None):
         n_samples, *shape = Xt.shape
         order = len(Xt.shape) - 1
-        # Calculate F statistic
-        F, p = f_oneway(Xt, y, classes, class_counts)
+        # F, p = f_oneway(Xt, y, classes, class_counts)
+        y_like_Xt = tl.zeros_like(Xt)
+        for ci, c in enumerate(classes):
+            y_like_Xt[y == c] = ci
 
-        # Select discriminatory components
+        new_rank = 1
         for k in range(order):
-            other_modes = tuple([kk for kk in range(order) if kk != k])
-            _, p_comb = combine_pvalues(p, axis=other_modes, method="fisher")
-
-            # Determine significance level
-            alpha = 0.05
-            # Bonferroni correction
-            alpha /= shape[k]
-
-            # Determine significantly discriminant components
-            idc = p_comb < alpha
-            if not np.any(idc):
-                idc = [np.argmax(p_comb)]
-            self.scalings_[k] = self.scalings_[k][:, idc]
-            self.rank_[k] = self.scalings_[k].shape[1]
-
-    def _sort_components(self, Xt, y, classes=None, class_counts=None):
-        n_samples, *shape = Xt.shape
-        order = len(Xt.shape) - 1
+            F, p = f_oneway(tl.unfold(Xt, k + 1).T, tl.unfold(y_like_Xt, k + 1).T[:, 0])
+            alpha = 0.05 / shape[k]
+            new_rank = int(max(new_rank, backend.np.count_nonzero((p < alpha))))
+            self.scalings_[k] = self.scalings_[k][:, backend.np.argsort(p)]
         for k in range(order):
-            mode_F = tl.zeros(shape[k], dtype=Xt.dtype)
-            for r in range(shape[k]):
-                mode_F[r], _ = f_multiway(
-                    np.take(Xt, r, axis=k + 1),
-                    y,
-                    classes=classes,
-                    class_counts=class_counts,
-                )
-            sort_idc = np.argsort(-mode_F)
-            self.scalings_[k] = self.scalings_[k][:, sort_idc]
-            self.aps_[k] = self.aps_[k][:, sort_idc]
+            self.scalings_[k] = self.scalings_[k][:, :new_rank]
+
+    #    def _prune(self, Xt, y, classes=None, class_counts=None):
+    #        n_samples, *shape = Xt.shape
+    #        order = len(Xt.shape) - 1
+    #        y_like_Xt = tl.zeros_like(Xt)
+    #        for ci, c in enumerate(classes):
+    #            y_like_Xt[y == c] = ci
+    #
+    #        new_rank = 1
+    #        print()
+    #        for k in range(order):
+    #            yk = tl.to_numpy(tl.unfold(y_like_Xt, k + 1).T[:, 0])
+    #            Xtk = tl.to_numpy(tl.unfold(Xt, k + 1).T)
+    #            bics = []
+    #            for r in range(1, shape[k] + 1):
+    #                Xtkr = Xtk[:, -r:]
+    #                clf = LinearDiscriminantAnalysis(solver="lsqr")
+    #                clf.fit(Xtkr, yk)
+    #                proba_pred = clf.predict_proba(Xtkr)
+    #                log_like = -log_loss(yk, proba_pred, normalize=False)
+    #                n_samples, n_features = Xtkr.shape
+    #                bics.append(float(bic(n_samples, n_features, log_like)))
+    #            new_rank = max(new_rank, np.argmin(bics) + 1)
+    #        for k in range(order):
+    #            self.scalings_[k] = self.scalings_[k][:, :new_rank]
+
+    def _calc_train_info(self, X, Xt, y, class_counts):
+        row = dict()
+        self._fit_inverse(X, Xt, y)
+        F_tr, _ = f_multiway(
+            Xt,
+            y,
+            self.classes_,
+            class_counts,
+            method="tr",
+        )
+        row["F_tr"] = F_tr
+
+        F_rt, _ = f_multiway(
+            Xt,
+            y,
+            self.classes_,
+            class_counts,
+            method="rt",
+        )
+
+        row["F_rt"] = F_rt
+        X_rec = self.inv_transform(Xt)
+        row["mse"] = mse(X, X_rec)
+        return row
 
     def transform(self, X, y=None):
         if not tl.is_tensor(X):
@@ -642,78 +675,94 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         raise NotImplemented
 
 
+class aHODA(HODA):
+    def __init__(self, clf=None, info_crit="bic", **params):
+        self.clf = clf
+        self.info_crit = info_crit
+        params["prune"] = False
+        super().__init__(**params)
+
+    def fit(self, X, y=None, Xt_defl=None):
+        n_samples, *shape = X.shape
+        clf = self.clf or LinearDiscriminantAnalysis()
+        last_crit = np.inf
+        for r in range(1, min(shape) + 1):
+            self.rank = r
+            super().fit(X, y)
+            Xt = self.transform(X)
+            Xt = Xt.reshape((n_samples, -1))
+            if Xt_defl is not None:
+                Xt = backend.np.hstack([Xt_defl, Xt])
+            Xt = tl.to_numpy(Xt)
+            # Calculate post hoc log likelihood
+            clf.fit(Xt, y)
+            proba_pred = clf.predict_proba(Xt)
+            log_likelihood = -log_loss(y, proba_pred, normalize=False)
+            n_features = Xt.shape[-1]
+            # Determine information criterion
+            if self.info_crit == "bic":
+                crit = bic(n_samples, n_features, log_likelihood)
+            elif self.info_crit == "aic":
+                crit = aic(n_features, log_likelihood)
+            else:
+                raise NotImplementedError
+            if crit >= last_crit:
+                self.crit_ = last_crit
+                break
+            last_crit = crit
+        self.rank -= 1
+        super().fit(X, y)
+        return self
+
+
 class BTTDA(BaseEstimator, TransformerMixin):
     def __init__(
         self,
-        n_blocks=None,
+        max_blocks=8,
         hoda_params=None,
-        deflate_transform=False,
-        verbose=False,
         keep_train_info=False,
+        verbose=False,
     ):
+        self.max_blocks = max_blocks
         self.hoda_params = hoda_params
-        self.n_blocks = n_blocks
         self.verbose = verbose
         self.keep_train_info = keep_train_info
-        self.deflate_transform = deflate_transform
 
-    def fit(self, X, y):
-        X = tl.tensor(X, dtype=X.dtype)
-        _, *shape = X.shape
-        self.classes_, y_num, class_counts = np.unique(
-            y, return_inverse=True, return_counts=True
-        )
-
-        hoda_params = self.hoda_params
-        if hoda_params is None:
-            hoda_params = dict()
-
-        self.train_info_ = []
-
+    def fit(self, X, y=None):
+        X = tl.tensor(X.copy())
+        hoda_params = self.hoda_params or dict()
         self.blocks_ = []
-        n_blocks = self.n_blocks or min(shape)
-        X_rec = np.zeros_like(X)
-        X_defl = X.copy()
-        norm_X = tl.norm(X)
-        last_explained = 0
-        # Deflation scheme
-        for self.n_blocks_ in range(1, n_blocks + 1):
+        self.train_info_ = []
+        for b in range(1, self.max_blocks + 1):
             if self.verbose:
-                print(f"Fitting block {self.n_blocks_}/{n_blocks}...")
-            # Fit Tucker block
-            block = HODA(**hoda_params)
-            block.fit(X_defl, y)
-            self.blocks_.append(block)
-            # Reconstruct and subtract for next iteration
-            Xt_block = block.transform(X_defl)
-            X_approx = block.inv_transform(Xt_block)
-            X_defl -= X_approx
-            X_rec += X_approx
-            explained = tl.norm(X_rec) / norm_X
-            if self.verbose:
-                print()
-            row = dict()
-            row["block"] = self.n_blocks_ - 1
-            row["mse"] = tl.to_numpy(mse(X, X_rec))
-            row["explained"] = float(explained)
-            row["explained_diff"] = float(explained - last_explained)
-            last_explained = explained
-            Xt_block = block.transform(X)
-            F, p = f_multiway(Xt_block, y)
-            row["F"] = float(tl.to_numpy(F))
-            row["p"] = float(tl.to_numpy(p))
-            row["norm"] = float(tl.norm(Xt_block))
-            self.train_info_.append(row)
-        # Convert train info to dataframe
-        self.train_info_ = pd.DataFrame(self.train_info_)
-        # Sort blocks based on F-score
-        # self.train_info_.sort_values("F", ascending=False, inplace=True)
-        # self.blocks_ = [self.blocks_[i] for i in self.train_info_["block"]]
-        self.train_info_.set_index(["block"], inplace=True)
+                print(f"Fitting block {b}/{self.n_blocks}...")
+            hoda = aHODA(**hoda_params)
+            if b > 1:
+                hoda.fit(X, y, Xt_defl=self.transform(X))
+            else:
+                hoda.fit(X, y)
+            if b > 1 and hoda.crit_ >= self.blocks_[-1].crit_:
+                break
+            Xtb = hoda.transform(X)
+            X_rec = hoda.inv_transform(Xtb)
+            X -= X_rec
+            self.blocks_.append(hoda)
+            if self.keep_train_info:
+                row = dict(block=self.n_blocks_)
+                row["mse"] = mse(X, X_rec)
+                row[hoda.info_crit] = hoda.crit_
+                self.train_info_.append(row)
+
+        # Create train info dataframe
+        if self.keep_train_info_:
+            self.train_info = pd.DataFrame(self.train_info_).astype(float)
+            self.train_info.set_index(["block"], inplace=True)
+
         return self
 
-    def _sort_blocks():
-        pass
+    @property
+    def n_blocks_(self):
+        return len(self.blocks_)
 
     def transform(self, X, y=None, n_blocks=None):
         X = tl.tensor(X.copy(), dtype=X.dtype)
@@ -724,8 +773,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         for b in range(n_blocks):
             block = self.blocks_[b]
             Xtb = block.transform(X, y)
-            if self.deflate_transform:
-                X -= block.inv_transform(Xtb)
             Xt.append(Xtb.reshape(n_samples, -1))
+
         Xt = tl.concatenate(Xt, axis=1)
         return Xt

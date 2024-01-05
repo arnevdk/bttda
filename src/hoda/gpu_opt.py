@@ -1,6 +1,7 @@
 import math
 import warnings
 
+import ipdb
 import numpy as np
 import tensorly as tl
 
@@ -192,6 +193,11 @@ def combine_pvalues(pvalues, axis=None, method="fisher", weights=None):
         df = 2 * k
         pval = backend.scipy.special.chdtrc(df, statistic)
         return (statistic, pval)
+
+    elif method == "edgington" or method == "average":
+        p = tl.mean(pvalues, axis=axis)
+        return p, p
+
     #    elif method == 'pearson':
     #        statistic = 2 * np.sum(np.log1p(-pvalues))
     #        pval = distributions.chi2.cdf(-statistic, 2 * len(pvalues))
