@@ -8,17 +8,15 @@ setup(
     author="Arne Van Den Kerchove",
     author_email="arne.vandenkerchove@kuleuven.be",
     install_requires=[
+        "scikit-learn",
         "tensorly",
         "tqdm",
         "statsmodels",
     ],
     extras_require={
-        "notebook": [
-            "pyyaml<5.4",
-            "numpy<1.24",
-            "moabb",
+        "experiments": [
+            "moabb==1.0.0",
             "jupyter",
-            "toeplitzlda",
             "seaborn",
         ]
     },

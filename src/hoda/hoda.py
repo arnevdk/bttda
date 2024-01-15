@@ -278,7 +278,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         taper=False,
         obj="rt",
         solver="lanczos",
-        prune=True,
         verbose=False,
         solver_params=None,
         keep_train_info=False,
@@ -295,7 +294,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.solver_params = solver_params
         self.keep_train_info = keep_train_info
         self.taper = taper
-        self.prune = prune
 
     def fit(self, X, y):
         # Setup
@@ -304,7 +302,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
         n_samples, *shape = X.shape
-        self.shape_ = shape
         order = len(shape)
 
         # Initialize solver
@@ -398,9 +395,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     largest=largest,
                     **solver_params,
                 )
-                # u, _ = tl.qr(u, mode="reduced")
-                sign = tl.sign(u[0, :])
-                u = u * sign[np.newaxis, :]
+                # Orthonormalize
+                u, _ = tl.qr(u, mode="reduced")
+                ## Flip signs
+                # sign = tl.sign(u[0, :])
+                # u = u * sign[np.newaxis, :]
 
                 # Store mode training information
                 if self.keep_train_info:
@@ -426,17 +425,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 update += np.log(mode_update) / order
                 mode_rows[k]["update"] = mode_update
             update = np.exp(update)
-
-            if self.prune and len(self.train_info_) and update < self.tol:
-                Xt = self.transform(X)
-                old_rank = self.rank_.copy()
-                self._prune(Xt, y, self.classes_, class_counts)
-                for k in range(order):
-                    mode_rows[k]["rank"] = self.rank_(k)
-                    if self.rank_(k) != old_rank[k]:
-                        update = np.inf
-                        mode_rows[k]["update"] = np.inf
-
             Xt = self.transform(X)
 
             # Store iteration training information
@@ -452,7 +440,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             ## Check convergence
             if update < self.tol:
                 break
-        self._fit_inverse(X, Xt, y)
+        self._fit_forward(X, Xt, y)
         # Convert train_info to dataframe
         self.train_info_ = pd.DataFrame(self.train_info_).astype(float)
         self.train_info_.set_index(["iteration"], inplace=True)
@@ -478,6 +466,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             rank = [min(shape) for _ in range(order)]
         elif isinstance(self.rank, int):
             rank = [self.rank for _ in range(order)]
+
+        for k in range(order):
+            if rank[k] > shape[k]:
+                raise ValueError(
+                    f"rank {rank} is not smaller or equal than shape {shape}"
+                )
 
         scalings = [None] * order
         if self.init == "mlsvd":
@@ -511,120 +505,30 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     )
         return scalings
 
-    def _fit_inverse(self, X, core, y):
+    def _fit_forward(self, X, core, y):
         n_samples, *shape = X.shape
         order = len(shape)
         self.aps_ = [None] * order
         self.cov_l_ = [None] * order
         self.cov_ = [None] * order
         _, core_centered = center(core, y, self.classes_)
-        for k in range(order):
-            scatter_l, _ = mode_scatter(
-                core_centered, k, assume_centered=True, shrinkage="lw"
-            )
-            self.cov_l_[k] = scatter_l / (math.prod(core.shape) / core.shape[k + 1] - 1)
-            self.cov_[k] = self.scatter_w_[k] / (
-                math.prod(core.shape) / core.shape[k + 1] - 1
-            )
-            # Haufe method
-            self.aps_[k] = (
-                self.cov_[k]
-                @ backend.np.linalg.solve(self.cov_l_[k], self.scalings_[k].T).T
-            )
+        _, X_centered = center(X, y, self.classes_)
 
-    # def _prune(self, Xt, y, snr, classes=None, class_counts=None):
-    #    n_samples, *shape = Xt.shape
-    #    order = len(Xt.shape) - 1
-    #    mode_F = [None] * order
-    #    for k in range(order):
-    #        mode_F[k] = tl.zeros(shape[k], dtype=Xt.dtype)
-    #        for r in range(shape[k]):
-    #            mode_slice = np.take(Xt, r, axis=k + 1)
-    #            mode_F[k][r], _ = f_multiway(
-    #                mode_slice,
-    #                y,
-    #                classes=classes,
-    #                class_counts=class_counts,
-    #            )
-    #        print(snr)
-    #        print(mode_F[k])
+        cov_core = tl.tensordot(core_centered.T, core_centered, axes=1)
+        cov_core /= n_samples - 1
+        X_centered_proj = self.transform(X_centered)
+        cross_cov_X_proj_X = tl.tensordot(X_centered_proj.T, X_centered, axes=1)
+        cross_cov_X_proj_X /= n_samples - 1
 
-    #    if (
-    #        not np.all([np.all(tl.to_numpy(F > snr)) for F in mode_F])
-    #        and min(self.rank_) > 1
-    #    ):
-    #        # new_rank = 0
-    #        # for k in range(order):
-    #        #    new_rank = int(max(new_rank, np.count_nonzero(mode_F[k] > snr)))
-    #        for k in range(order):
-    #            # self.rank_(k) = new_rank
-    #            idc = np.argsort(-mode_F[k])
-    #            # self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_(k)]]
-    #            self.rank_(k) -= 1
-    #            self.scalings_[k] = self.scalings_[k][:, idc[: self.rank_(k)]]
-
-    # def _prune(self, Xt, y, classes=None, class_counts=None):
-    #    n_samples, *shape = Xt.shape
-    #    order = len(Xt.shape) - 1
-    #    # Calculate F statistic
-    #    F, p = f_oneway(Xt, y, classes, class_counts)
-    #    # Determine significance level
-
-    #    new_rank = 1
-    #    for k in range(order):
-    #        other_modes = tuple([kk for kk in range(order) if kk != k])
-    #        _, p_comb = combine_pvalues(p, axis=other_modes, method="fisher")
-    #        alpha = 0.05 / shape[k]
-    #        new_rank = int(max(new_rank, backend.np.count_nonzero((p_comb < alpha))))
-    #        self.scalings_[k] = self.scalings_[k][:, backend.np.argsort(p_comb)]
-    #    for k in range(order):
-    #        self.scalings_[k] = self.scalings_[k][:, :new_rank]
-
-    def _prune(self, Xt, y, classes=None, class_counts=None):
-        n_samples, *shape = Xt.shape
-        order = len(Xt.shape) - 1
-        # F, p = f_oneway(Xt, y, classes, class_counts)
-        y_like_Xt = tl.zeros_like(Xt)
-        for ci, c in enumerate(classes):
-            y_like_Xt[y == c] = ci
-
-        new_rank = 1
-        for k in range(order):
-            F, p = f_oneway(tl.unfold(Xt, k + 1).T, tl.unfold(y_like_Xt, k + 1).T[:, 0])
-            alpha = 0.05 / shape[k]
-            new_rank = int(max(new_rank, backend.np.count_nonzero((p < alpha))))
-            self.scalings_[k] = self.scalings_[k][:, backend.np.argsort(p)]
-        for k in range(order):
-            self.scalings_[k] = self.scalings_[k][:, :new_rank]
-
-    #    def _prune(self, Xt, y, classes=None, class_counts=None):
-    #        n_samples, *shape = Xt.shape
-    #        order = len(Xt.shape) - 1
-    #        y_like_Xt = tl.zeros_like(Xt)
-    #        for ci, c in enumerate(classes):
-    #            y_like_Xt[y == c] = ci
-    #
-    #        new_rank = 1
-    #        print()
-    #        for k in range(order):
-    #            yk = tl.to_numpy(tl.unfold(y_like_Xt, k + 1).T[:, 0])
-    #            Xtk = tl.to_numpy(tl.unfold(Xt, k + 1).T)
-    #            bics = []
-    #            for r in range(1, shape[k] + 1):
-    #                Xtkr = Xtk[:, -r:]
-    #                clf = LinearDiscriminantAnalysis(solver="lsqr")
-    #                clf.fit(Xtkr, yk)
-    #                proba_pred = clf.predict_proba(Xtkr)
-    #                log_like = -log_loss(yk, proba_pred, normalize=False)
-    #                n_samples, n_features = Xtkr.shape
-    #                bics.append(float(bic(n_samples, n_features, log_like)))
-    #            new_rank = max(new_rank, np.argmin(bics) + 1)
-    #        for k in range(order):
-    #            self.scalings_[k] = self.scalings_[k][:, :new_rank]
+        cov_core_r = cov_core.reshape(math.prod(self.ml_rank_), -1)
+        cross_cov_r = cross_cov_X_proj_X.reshape(math.prod(self.ml_rank_), -1)
+        A_r = tl.solve(cov_core_r, cross_cov_r)
+        A = A_r.reshape((*self.ml_rank_, *shape))
+        self.A_ = A
 
     def _calc_train_info(self, X, Xt, y, class_counts):
         row = dict()
-        self._fit_inverse(X, Xt, y)
+        self._fit_forward(X, Xt, y)
         F_tr, _ = f_multiway(
             Xt,
             y,
@@ -659,11 +563,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def inv_transform(self, Xt, y=None):
         if not tl.is_tensor(Xt):
             Xt = tl.tensor(Xt, dtype=Xt.dtype)
-        order = len(Xt.shape) - 1
-        X = tl.tenalg.multi_mode_dot(
-            Xt, self.aps_, modes=range(1, order + 1), transpose=False
-        )
-        return X
+        return tl.tensordot(Xt, self.A_)
+        # order = len(Xt.shape) - 1
+        # X = tl.tenalg.multi_mode_dot(
+        #    Xt, self.scalings_, modes=range(1, order + 1), transpose=False
+        # )
+        # return X
 
     def log_likelihood(X):
         """Based on the Multilinear normal distribution and LDA
@@ -675,90 +580,100 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         raise NotImplemented
 
 
-class aHODA(HODA):
-    def __init__(self, clf=None, info_crit="bic", **params):
-        self.clf = clf
-        self.info_crit = info_crit
-        params["prune"] = False
-        super().__init__(**params)
-
-    def fit(self, X, y=None, Xt_defl=None):
-        n_samples, *shape = X.shape
-        clf = self.clf or LinearDiscriminantAnalysis()
-        last_crit = np.inf
-        for r in range(1, min(shape) + 1):
-            self.rank = r
-            super().fit(X, y)
-            Xt = self.transform(X)
-            Xt = Xt.reshape((n_samples, -1))
-            if Xt_defl is not None:
-                Xt = backend.np.hstack([Xt_defl, Xt])
-            Xt = tl.to_numpy(Xt)
-            # Calculate post hoc log likelihood
-            clf.fit(Xt, y)
-            proba_pred = clf.predict_proba(Xt)
-            log_likelihood = -log_loss(y, proba_pred, normalize=False)
-            n_features = Xt.shape[-1]
-            # Determine information criterion
-            if self.info_crit == "bic":
-                crit = bic(n_samples, n_features, log_likelihood)
-            elif self.info_crit == "aic":
-                crit = aic(n_features, log_likelihood)
-            else:
-                raise NotImplementedError
-            if crit >= last_crit:
-                self.crit_ = last_crit
-                break
-            last_crit = crit
-        self.rank -= 1
-        super().fit(X, y)
-        return self
-
-
 class BTTDA(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         max_blocks=8,
+        info_crit="bic",
         hoda_params=None,
         keep_train_info=False,
         verbose=False,
     ):
         self.max_blocks = max_blocks
         self.hoda_params = hoda_params
+        self.info_crit = info_crit
         self.verbose = verbose
         self.keep_train_info = keep_train_info
 
     def fit(self, X, y=None):
         X = tl.tensor(X.copy())
+        _, *shape = X.shape
         hoda_params = self.hoda_params or dict()
         self.blocks_ = []
         self.train_info_ = []
+
+        # last_crit = np.inf
+        crit = np.inf
+        X_defl = X.copy()
+        if self.keep_train_info:
+            X_rec = tl.zeros_like(X_defl)
         for b in range(1, self.max_blocks + 1):
             if self.verbose:
-                print(f"Fitting block {b}/{self.n_blocks}...")
-            hoda = aHODA(**hoda_params)
-            if b > 1:
-                hoda.fit(X, y, Xt_defl=self.transform(X))
+                print(f"Fitting block {b}/{self.max_blocks}...")
+            if self.n_blocks_:
+                Xt = self.transform(X)
             else:
-                hoda.fit(X, y)
-            if b > 1 and hoda.crit_ >= self.blocks_[-1].crit_:
-                break
-            Xtb = hoda.transform(X)
-            X_rec = hoda.inv_transform(Xtb)
-            X -= X_rec
-            self.blocks_.append(hoda)
+                Xt = None
+
+            if self.info_crit is not None:
+                block = None
+                for r in range(1, min(shape) + 1):
+                    # for r in [1]:
+                    hoda_params["rank"] = r
+                    new_block = HODA(**hoda_params)
+                    new_block.fit(X_defl, y)
+                    new_Xtb = new_block.transform(X_defl)
+                    new_crit = evaluate_info_crit(
+                        new_Xtb, y, Xt_defl=Xt, info_crit=self.info_crit
+                    )
+                    if new_crit >= crit:
+                        break
+                    block = new_block
+                    crit = new_crit
+                if block is None:
+                    break
+            else:
+                block = HODA(**hoda_params)
+                block.fit(X_defl, y)
+
+            self.blocks_.append(block)
+            Xtb = block.transform(X_defl)
+            X_rec_b = block.inv_transform(Xtb)
+            X_defl -= X_rec_b
             if self.keep_train_info:
+                X_rec += X_rec_b
                 row = dict(block=self.n_blocks_)
                 row["mse"] = mse(X, X_rec)
-                row[hoda.info_crit] = hoda.crit_
+                row[self.info_crit] = crit
                 self.train_info_.append(row)
 
-        # Create train info dataframe
-        if self.keep_train_info_:
-            self.train_info = pd.DataFrame(self.train_info_).astype(float)
-            self.train_info.set_index(["block"], inplace=True)
+        if self.keep_train_info:
+            self.train_info_ = pd.DataFrame(self.train_info_).astype(float)
+            self.train_info_.set_index(["block"], inplace=True)
 
         return self
+
+    @staticmethod
+    def evaluate(self, Xt, y, Xt_defl=None, info_crit="bic"):
+        n_samples, *_ = Xt.shape
+        Xt = Xt.reshape((n_samples, -1))
+        if Xt_defl is not None:
+            Xt = backend.np.hstack([Xt, Xt_defl])
+        Xt = tl.to_numpy(Xt)
+
+        clf = LinearDiscriminantAnalysis()
+        clf.fit(Xt, y)
+        proba_pred = clf.predict_proba(Xt)
+        log_likelihood = -log_loss(y, proba_pred, normalize=False)
+        n_features = Xt.shape[-1]
+        # Determine information criterion
+        if self.info_crit == "bic":
+            value = bic(n_samples, n_features, log_likelihood)
+        elif self.info_crit == "aic":
+            value = aic(n_features, log_likelihood)
+        else:
+            raise NotImplementedError
+        return value
 
     @property
     def n_blocks_(self):
@@ -777,3 +692,25 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
         Xt = tl.concatenate(Xt, axis=1)
         return Xt
+
+
+def evaluate_info_crit(Xt, y, Xt_defl=None, info_crit="bic"):
+    n_samples, *_ = Xt.shape
+    Xt = Xt.reshape((n_samples, -1))
+    if Xt_defl is not None:
+        Xt = backend.np.hstack([Xt, Xt_defl])
+    Xt = tl.to_numpy(Xt)
+
+    clf = LinearDiscriminantAnalysis()
+    clf.fit(Xt, y)
+    proba_pred = clf.predict_proba(Xt)
+    log_likelihood = -log_loss(y, proba_pred, normalize=False)
+    n_features = Xt.shape[-1]
+    # Determine information criterion
+    if info_crit == "bic":
+        value = bic(n_samples, n_features, log_likelihood)
+    elif info_crit == "aic":
+        value = aic(n_features, log_likelihood)
+    else:
+        raise NotImplementedError
+    return value
