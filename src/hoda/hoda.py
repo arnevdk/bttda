@@ -173,7 +173,9 @@ def f_oneway(X, y, classes=None, class_counts=None):
     return F, p
 
 
-def mode_scatter(X, k, weights=None, shrinkage=0, assume_centered=False):
+def mode_scatter(
+    X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
+):
     """Calculate the scatter matrix along a given tensor mode"""
     if weights is not None:
         X = (X.T * weights).T
@@ -192,6 +194,9 @@ def mode_scatter(X, k, weights=None, shrinkage=0, assume_centered=False):
     scatter = tl.tensordot(X, X.conj(), axes=(modes, modes))
     structured = tl.mean(tl.diag(scatter)) * tl.eye(scatter.shape[0], dtype=X.dtype)
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
+    if toeplitz is not None and k in toeplitz:
+        scatter = force_toeplitz(scatter, taper=taper)
+
     return scatter, shrinkage
 
 
@@ -360,10 +365,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     shrinkage = self.shrinkage
 
                 scatter_w, shrinkage = mode_scatter(
-                    X_centered_proj, k, assume_centered=True, shrinkage=shrinkage
+                    X_centered_proj,
+                    k,
+                    assume_centered=True,
+                    shrinkage=shrinkage,
+                    toeplitz=self.toeplitz,
+                    taper=self.taper,
                 )
-                if self.toeplitz is not None and k in self.toeplitz:
-                    scatter_w = force_toeplitz(scatter_w, taper=self.taper)
                 self.scatter_w_[k] = scatter_w
 
                 # Calculate between class scatter
@@ -530,8 +538,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         self.aps_ = [None] * order
         for k in range(order):
-            cov_x, _ = mode_scatter(X_centered, k, shrinkage=0, assume_centered=True)
-            cov_g, _ = mode_scatter(Xt_centered, k, shrinkage=0, assume_centered=True)
+            cov_x, _ = mode_scatter(
+                X_centered,
+                k,
+                shrinkage=self.shrinkage,
+                assume_centered=True,
+                toeplitz=self.toeplitz,
+                taper=self.taper,
+            )
+            cov_g, _ = mode_scatter(
+                Xt_centered, k, shrinkage=self.shrinkage, assume_centered=True
+            )
             if k == 0:
                 cov_x /= tl.trace(cov_x) / shape[k]
                 cov_g /= tl.trace(cov_g) / self.ml_rank_[k]
@@ -631,37 +648,37 @@ class BTTDA(BaseEstimator, TransformerMixin):
             if self.verbose:
                 print(f"Fitting block {b}/{self.max_blocks}...")
 
-            # if self.info_crit is not None:
-            #    block = None
-            #    for r in range(1, min(shape) + 1):
-            #        # for r in [1]:
-            #        hoda_params["rank"] = r
-            #        new_block = HODA(**hoda_params)
-            #        new_block.fit(X_defl, y)
-            #        new_Xtb = new_block.transform(X_defl)
-            #        new_crit = evaluate_info_crit(
-            #            new_Xtb, y, Xt_defl=Xt, info_crit=self.info_crit
-            #        )
-            #        if new_crit >= crit:
-            #            break
-            #        block = new_block
-            #        crit = new_crit
-            #    if block is None:
-            #        break
-            # else:
-            #    block = HODA(**hoda_params)
-            #    block.fit(X_defl, y)
+            if self.info_crit is not None:
+                block = None
+                if b > 1:
+                    Xt = self.transform(X)
+                else:
+                    Xt = None
+                for r in range(1, min(shape) + 1):
+                    # for r in [1]:
+                    hoda_params["rank"] = r
+                    new_block = HODA(**hoda_params)
+                    new_block.fit(err, y)
+                    new_Xtb = new_block.transform(err)
+                    new_crit = evaluate_info_crit(
+                        new_Xtb, y, Xt_extra=Xt, info_crit=self.info_crit
+                    )
+                    if new_crit >= crit:
+                        break
+                    block = new_block
+                    crit = new_crit
+                if block is None:
+                    break
+            else:
+                block = HODA(**hoda_params)
+                block.fit(err, y)
 
-            block = HODA(**hoda_params)
-            block.fit(err, y)
             self.blocks_.append(block)
             err -= block.inv_transform(block.transform(err))
 
             if self.keep_train_info:
                 row = dict(block=self.n_blocks_)
                 row[self.info_crit] = float(crit)
-                # Xt = self.transform(X)
-                # X_rec = self.inv_transform(Xt)
                 row["rank"] = block.ml_rank_
                 row["mse"] = float(tl.abs(tl.mean((err) ** 2)))
                 self.train_info_.append(row)
@@ -686,6 +703,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             block = self.blocks_[b]
             Xtb = block.transform(X, y)
             Xt.append(Xtb.reshape(n_samples, -1))
+            X -= block.inv_transform(Xtb)
 
         Xt = tl.concatenate(Xt, axis=1)
         return Xt
@@ -707,14 +725,14 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return X
 
 
-def evaluate_info_crit(Xt, y, Xt_defl=None, info_crit="bic"):
+def evaluate_info_crit(Xt, y, Xt_extra=None, info_crit="bic"):
     n_samples, *_ = Xt.shape
     Xt = Xt.reshape((n_samples, -1))
-    if Xt_defl is not None:
-        Xt = backend.np.hstack([Xt, Xt_defl])
+    if Xt_extra is not None:
+        Xt = backend.np.hstack([Xt, Xt_extra])
     Xt = tl.to_numpy(Xt)
 
-    clf = LinearDiscriminantAnalysis()
+    clf = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
     clf.fit(Xt, y)
     proba_pred = clf.predict_proba(Xt)
     log_likelihood = -log_loss(y, proba_pred, normalize=False)
