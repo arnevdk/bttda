@@ -1,6 +1,7 @@
 import numpy as np
 import tensorly as tl
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.feature_selection import SelectFwe
 from sklearn.preprocessing import FunctionTransformer
 
 # from toeplitzlda.classification import ToeplitzLDA
@@ -13,6 +14,14 @@ def reshape(X, y=None):
 class Vectorize(FunctionTransformer):
     def __init__(self, **params):
         super().__init__(func=reshape, **params)
+
+
+class SelectFweAtLeastOne(SelectFwe):
+    def _get_support_mask(self):
+        mask = super()._get_support_mask()
+        if not np.any(mask):
+            mask = self.pvalues_ == np.min(self.pvalues_)
+        return mask
 
 
 # class ToeplitzLDAWrapper(BaseEstimator, ClassifierMixin):

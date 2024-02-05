@@ -274,7 +274,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Initialize projections
         if self.verbose:
             print("Initializing factors...")
-        self.weights_ = self._init(X, self.rank)
+        self.scalings_ = self._init(X, self.rank)
         scatter_X = [None] * order
         for k in range(order):
             Xk = tl.unfold(X, k + 1)
@@ -296,14 +296,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if self.verbose:
             iterator = tqdm(iterator)
         for self.iter_ in iterator:
-            new_weights = [None] * order
+            new_scalings = [None] * order
 
             mode_rows = [dict(iteration=self.iter_, mode=k) for k in range(order)]
             for k in range(order):
                 modes = range(1, order + 1)
                 X_centered_proj = tl.tenalg.multi_mode_dot(
                     X_centered,
-                    self.weights_,
+                    self.scalings_,
                     modes=modes,
                     skip=k,
                     transpose=True,
@@ -326,7 +326,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 # Calculate between class scatter
                 means_centered_proj = tl.tenalg.multi_mode_dot(
-                    means_centered, self.weights_, modes=modes, skip=k, transpose=True
+                    means_centered, self.scalings_, modes=modes, skip=k, transpose=True
                 )
                 scatter_b, _ = mode_scatter(
                     means_centered_proj, k, weights=tl.sqrt(class_counts), shrinkage=0
@@ -335,10 +335,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 # Solve
                 A, B, largest = OBJECTIVES[self.obj](
-                    scatter_b, scatter_w, self.weights_[k]
+                    scatter_b, scatter_w, self.scalings_[k]
                 )
                 if self.solver == "lobpcg":
-                    solver_params["init"] = self.weights_[k]
+                    solver_params["init"] = self.scalings_[k]
                 u, w = trunc_eigh(
                     A,
                     B,
@@ -366,17 +366,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     mode_rows[k]["objective"] = obj
                     mode_rows[k]["shrinkage"] = shrinkage
                     mode_rows[k]["rank"] = self.rank_(k)
-                new_weights[k] = u
+                new_scalings[k] = u
 
-            # Update weights
-            old_weights = self.weights_
-            self.weights_ = new_weights
+            # Update scalings
+            old_scalings = self.scalings_
+            self.scalings_ = new_scalings
 
             # Calculate update
             update = 0
             for k in range(order):
-                u_old = old_weights[k]
-                u_new = self.weights_[k]
+                u_old = old_scalings[k]
+                u_new = self.scalings_[k]
                 if u_old.shape != u_new.shape:
                     mode_update = np.inf
                 else:
@@ -411,11 +411,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return self
 
     def rank_(self, k):
-        return self.weights_[k].shape[-1]
+        return self.scalings_[k].shape[-1]
 
     @property
     def ml_rank_(self):
-        order = len(self.weights_)
+        order = len(self.scalings_)
         return tuple([self.rank_(k) for k in range(order)])
 
     def _init(self, X, rank):
@@ -432,10 +432,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     f"rank {rank} is not smaller or equal than shape {shape}"
                 )
 
-        weights = [None] * order
+        scalings = [None] * order
         if self.init == "mlsvd":
             modes = tuple(range(1, order + 1))
-            (_, weights), _ = tl.decomposition.partial_tucker(
+            (_, scalings), _ = tl.decomposition.partial_tucker(
                 X,
                 rank=rank,
                 modes=modes,
@@ -443,26 +443,26 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         else:
             for k in range(order):
                 if self.init == "identity":
-                    weights[k] = tl.eye(shape[k], rank[k], dtype=X.dtype)
+                    scalings[k] = tl.eye(shape[k], rank[k], dtype=X.dtype)
                 elif self.init == "ones":
-                    weights[k] = tl.ones((shape[k], rank[k]), dtype=X.dtype)
+                    scalings[k] = tl.ones((shape[k], rank[k]), dtype=X.dtype)
                 elif self.init == "random":
-                    weights[k] = tl_random.random_tensor(
+                    scalings[k] = tl_random.random_tensor(
                         shape=(shape[k], rank[k]),
                     )
-                    weights[k], _ = tl.qr(weights[k], mode="reduced")
+                    scalings[k], _ = tl.qr(scalings[k], mode="reduced")
                 elif self.init == "eye":
-                    weights[k] = tl.eye(shape[k], dtype=X.dtype)[:, : rank[k]]
+                    scalings[k] = tl.eye(shape[k], dtype=X.dtype)[:, : rank[k]]
                 elif self.init == "svd":
                     Xk = tl.unfold(X, k + 1)
-                    weights[k], _, _ = tensorly.tenalg.svd_interface(
+                    scalings[k], _, _ = tensorly.tenalg.svd_interface(
                         Xk, n_eigenvecs=rank[k]
                     )
                 else:
                     raise ValueError(
                         "init should be one of {identity, ones, random, svd}"
                     )
-        return weights
+        return scalings
 
     def _fit_forward(self, X, Xt, y):
         n_samples, *shape = X.shape
@@ -472,8 +472,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         self.cov_x_ = [None] * order
         self.cov_g_ = [None] * order
-        self.scale_x_ = tl.zeros(order)
-        self.scale_g_ = tl.zeros(order)
         self.aps_ = [None] * order
         for k in range(order):
             cov_x, _ = mode_scatter(
@@ -487,24 +485,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             cov_g, _ = mode_scatter(
                 Xt_centered, k, shrinkage=self.shrinkage, assume_centered=True
             )
-
-            scale_x = (tl.trace(cov_x) / shape[k]) / (
-                n_samples * math.prod(shape) / shape[k] - 1
-            )
-            scale_g = (tl.trace(cov_g) / self.ml_rank_[k]) / (
-                n_samples * math.prod(self.ml_rank_) / self.rank_(k) - 1
-            )
-
-            cov_x /= tl.trace(cov_x) / shape[k]
-            cov_g /= tl.trace(cov_g) / self.ml_rank_[k]
-
+            if k == 0:
+                cov_x /= tl.trace(cov_x) / shape[k]
+                cov_g /= tl.trace(cov_g) / self.ml_rank_[k]
+            else:
+                cov_x /= n_samples * math.prod(shape) / shape[k] - 1
+                cov_g /= n_samples * math.prod(self.ml_rank_) / self.rank_(k) - 1
             self.cov_g_[k] = cov_g
             self.cov_x_[k] = cov_x
-            self.scale_x_[k] = scale_x
-            self.scale_g_[k] = scale_g
-            self.aps_[k] = cov_x @ tl.solve(cov_g, self.weights_[k].T).T
-        self.scale_x_ = tl.mean(self.scale_x_)
-        self.scale_g_ = tl.mean(self.scale_g_)
+            self.aps_[k] = cov_x @ tl.solve(cov_g, self.scalings_[k].T).T
 
     def _calc_train_info(self, X, Xt, y, class_counts):
         row = dict()
@@ -541,18 +530,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             X = tl.tensor(X, dtype=X.dtype)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
-            X, self.weights_, modes=range(1, order + 1), transpose=True
+            X, self.scalings_, modes=range(1, order + 1), transpose=True
         )
         return Xt
 
     def inv_transform(self, Xt, y=None):
         if not tl.is_tensor(Xt):
             Xt = tl.tensor(Xt, dtype=Xt.dtype)
-        return (
-            tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=[1, 2])
-            * self.scale_x_
-            / self.scale_g_
-        )
+        return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=[1, 2])
 
     #    def log_likelihood(self, X, y):
     #        """
@@ -594,9 +579,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     #        # for k in range(order):
     #        #    cov_x[k] = (
     #        #        self.aps_[k]
-    #        #        @ self.weights_[k].T
+    #        #        @ self.scalings_[k].T
     #        #        @ cov_x[k]
-    #        #        @ self.weights_[k]
+    #        #        @ self.scalings_[k]
     #        #        @ self.aps_[k].T
     #        #    )
     #        cov_inv = [backend.np.linalg.pinv(c) for c in cov_x]
@@ -617,7 +602,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     @property
     def n_params_(self):
-        return sum([s.size for s in self.weights_])
+        return sum([s.size for s in self.scalings_])
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
@@ -640,8 +625,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         n_samples, *shape = X.shape
         hoda_params = self.hoda_params or dict()
         self.blocks_ = []
-        if self.keep_train_info:
-            self.train_info_ = []
+        self.train_info_ = []
 
         crit_value = np.inf
         err = X.copy()
@@ -669,11 +653,13 @@ class BTTDA(BaseEstimator, TransformerMixin):
                     # else:
                     #    new_Xt = Xtb.reshape((n_samples, -1))
                     new_Xt = Xtb
+                    print(new_block.scalings_)
                     new_log_like = log_likelihood(new_Xt, y)
                     new_n_params = new_Xt.shape[-1]
                     new_crit_value = info_crit[self.info_crit](
                         n_samples, new_n_params, new_log_like
                     )
+                    new_crit_value = np.inf
                     if new_crit_value >= crit_value:
                         break
                     block = new_block
@@ -740,7 +726,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         if n_blocks is None:
             n_blocks = self.n_blocks_
         n_blocks = min(n_blocks, self.n_blocks_)
-        shape = (n_samples, *[s.shape[0] for s in self.blocks_[0].weights_])
+        shape = (n_samples, *[s.shape[0] for s in self.blocks_[0].scalings_])
         X = tl.zeros(shape)
         for b in range(n_blocks):
             block = self.blocks_[b]
