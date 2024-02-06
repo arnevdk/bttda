@@ -180,7 +180,6 @@ def trunc_eigh(
     rank=None,
     largest=True,
     method="lanczos",
-    flip_sign=True,
     **solver_params,
 ):
     """
@@ -193,7 +192,6 @@ def trunc_eigh(
             A, B=B, rank=rank, largest=largest, **solver_params
         )
     elif method == "svd":
-        solver_params["flip_sign"] = flip_sign
         solver_params.setdefault("method", "truncated_svd")
         if largest:
             solver_params["n_eigenvecs"] = rank
@@ -216,9 +214,6 @@ def trunc_eigh(
             A, init, B=B, rank=rank, largest=largest, **solver_params
         )
 
-    if flip_sign:
-        sign = tl.sign(v[0, :])
-        v = v * sign[np.newaxis, :]
     return v, w
 
 
@@ -275,10 +270,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if self.verbose:
             print("Initializing factors...")
         self.weights_ = self._init(X, self.rank)
-        scatter_X = [None] * order
+        scatter_x = [None] * order
         for k in range(order):
-            Xk = tl.unfold(X, k + 1)
-            scatter_X[k] = Xk @ Xk.T
+            scatter_x[k], _ = mode_scatter(
+                X,
+                k,
+                assume_centered=True,
+                shrinkage=self.shrinkage,
+                toeplitz=self.toeplitz,
+                taper=self.taper,
+            )
 
         # Initialize iterative algorithm
         self.scatter_w_ = [None] * order
@@ -348,7 +349,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     **solver_params,
                 )
                 u, w = trunc_eigh(
-                    u @ u.T @ (scatter_X[k]) @ u @ u.T,
+                    u @ u.T @ (scatter_x[k]) @ u @ u.T,
                     rank=self.rank_(k),
                     method="lanczos",
                     largest=largest,
@@ -356,7 +357,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 )
                 # Orthonormalize
                 u, _ = tl.qr(u, mode="reduced")
-                # Flip signs
                 # sign = tl.sign(u[0, :])
                 # u = u * sign[np.newaxis, :]
 
@@ -371,6 +371,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             # Update weights
             old_weights = self.weights_
             self.weights_ = new_weights
+            # print([w.T for w in self.weights_])
 
             # Calculate update
             update = 0
@@ -476,7 +477,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.scale_g_ = tl.zeros(order)
         self.aps_ = [None] * order
         for k in range(order):
-            cov_x, _ = mode_scatter(
+            cov_x, shrink_x = mode_scatter(
                 X_centered,
                 k,
                 shrinkage=self.shrinkage,
@@ -484,8 +485,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 toeplitz=self.toeplitz,
                 taper=self.taper,
             )
-            cov_g, _ = mode_scatter(
-                Xt_centered, k, shrinkage=self.shrinkage, assume_centered=True
+            cov_g, shrink_g = mode_scatter(
+                Xt_centered,
+                k,
+                # shrinkage=self.shrinkage,
+                assume_centered=True,
             )
 
             scale_x = (tl.trace(cov_x) / shape[k]) / (
@@ -659,15 +663,15 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
                 crit_value = np.inf
                 for r in range(1, min(shape) + 1):
-                    # for r in [1]:
                     hoda_params["rank"] = r
                     new_block = HODA(**hoda_params)
                     new_block.fit(err, y)
                     Xtb = new_block.transform(err)
-                    # if b > 1:
-                    #    new_Xt = backend.np.hstack([Xt, Xtb.reshape((n_samples, -1))])
-                    # else:
-                    #    new_Xt = Xtb.reshape((n_samples, -1))
+                    Xtb = Xtb.reshape((n_samples, -1))
+                    if b > 1:
+                        new_Xt = backend.np.hstack([Xt, Xtb])
+                    else:
+                        new_Xt = Xtb
                     new_Xt = Xtb
                     new_log_like = log_likelihood(new_Xt, y)
                     new_n_params = new_Xt.shape[-1]
@@ -702,7 +706,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 for crit, func in info_crit.items():
                     row[crit] = float(func(n_samples, k, row["log_like"]))
                 row["rank"] = block.ml_rank_
-                row["mse"] = float(tl.abs(tl.mean((err) ** 2)))
+                row["mse"] = float(tl.mean((err) ** 2))
                 self.train_info_.append(row)
 
         if self.keep_train_info:
