@@ -371,7 +371,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             # Update weights
             old_weights = self.weights_
             self.weights_ = new_weights
-            # print([w.T for w in self.weights_])
 
             # Calculate update
             update = 0
@@ -782,7 +781,7 @@ info_crit = dict(
 def log_likelihood(Xt, y):
     clf = make_pipeline(
         Vectorize(),
-        SelectFweAtLeastOne(),
+        # SelectFweAtLeastOne(),
         LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
     )
     clf.fit(Xt, y)

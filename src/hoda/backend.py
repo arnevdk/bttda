@@ -59,7 +59,19 @@ class CupyxScipyBackend(Backend):
             rank = A.shape[0]
         if B is not None:
             # https://discuss.tensorflow.org/t/compute-generalised-eigenvectors/12323
-            L = cupy.linalg.cholesky(B)
+
+            # L = cupy.linalg.cholesky(B)
+
+            # Ensure B is semi-positive definite
+            eigvals, eigvecs = cupy.linalg.eigh(B)
+            # eigvecs[:, eigvals < 0] = 0
+            eigvals[eigvals < 0] = 0
+            eigvecs, _ = tl.qr(eigvecs, mode="complete")
+            _, L = cupy.linalg.qr(
+                cupy.diag(cupy.sqrt(eigvals)) @ eigvecs.T, mode="complete"
+            )
+            L = L.T
+
             Y = cupyx.scipy.linalg.solve_triangular(L, A.T, lower=True).T
             C = cupyx.scipy.linalg.solve_triangular(L, Y, lower=True)
         else:
