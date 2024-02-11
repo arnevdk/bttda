@@ -6,6 +6,7 @@ import pandas as pd
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
+from numpy.linalg import LinAlgError
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import log_loss
@@ -15,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
-import hoda.backend as backend
+from hoda.backend import lanczos, lobpcg
 from hoda.classification import SelectFweAtLeastOne, Vectorize
 from hoda.cov import center, mode_scatter
 
@@ -49,12 +50,6 @@ def obj_tr(scatter_b, scatter_w, u, psi=1):
     Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
     """
     phi = tl.trace(u.T @ scatter_b @ u) / tl.trace(u.T @ scatter_w @ u)
-    # _, phi = trunc_eigh(
-    #    backend.np.linalg.pinv(scatter_w) @ scatter_b,
-    #    rank=1,
-    #    method="lanczos",
-    #    largest=True,
-    # )
     A = scatter_b - psi * phi * scatter_w
     return A, None, True
 
@@ -166,12 +161,7 @@ def f_oneway(X, y, classes=None, class_counts=None):
     msb = ssbn / dfbn
     msw = sswn / dfwn
     F = msb / msw
-    p = backend.scipy.special.fdtrc(dfbn, dfwn, F)
-    return F, p
-
-
-def mse(A, B):
-    return tl.abs(tl.mean((B - A) ** 2))
+    return F
 
 
 def trunc_eigh(
@@ -188,9 +178,13 @@ def trunc_eigh(
     """
     solver_params = solver_params or dict()
     if method == "lanczos":
-        v, w = backend.scipy.lanczos(
-            A, B=B, rank=rank, largest=largest, **solver_params
-        )
+        try:
+            v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
+        except LinAlgError:
+            v, w = v, w = lanczos(
+                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
+            )
+
     elif method == "svd":
         solver_params.setdefault("method", "truncated_svd")
         if largest:
@@ -200,9 +194,7 @@ def trunc_eigh(
         if B is None:
             v, w, _ = tl.tenalg.svd_interface(A, **solver_params)
         else:
-            v, w, _ = tl.tenalg.svd_interface(
-                backend.np.linalg.solve(B @ A), **solver_params
-            )
+            v, w, _ = tl.tenalg.svd_interface(tl.solve(B @ A), **solver_params)
         if not largest:
             w = w[-rank:]
             v = v[:, -rank:]
@@ -210,9 +202,12 @@ def trunc_eigh(
     elif method == "lobpcg":
         init = solver_params.pop("init", tl.eye(A.shape[0], dtype=A.dtype))
         init = init[:, :rank]
-        v, w = backend.scipy.sparse.linalg.lobpcg(
-            A, init, B=B, rank=rank, largest=largest, **solver_params
-        )
+        try:
+            w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
+        except (LinAlgError, AttributeError):
+            v, w = lanczos(
+                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
+            )
 
     return v, w
 
@@ -231,7 +226,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         solver="lanczos",
         verbose=False,
         solver_params=None,
-        keep_train_info=False,
+        extra_train_info=False,
+        random_state=42,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -243,13 +239,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.solver = solver
         self.verbose = verbose
         self.solver_params = solver_params
-        self.keep_train_info = keep_train_info
+        self.extra_train_info = extra_train_info
         self.taper = taper
+        self.random_state = random_state
 
     def fit(self, X, y):
         # Setup
-        # X = tl.tensor(X.copy(), dtype=X.dtype)
-        X = tl.tensor(X, dtype=X.dtype)
+        if not tl.is_tensor(X):
+            X = tl.tensor(X, dtype=X.dtype)
+
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
         n_samples, *shape = X.shape
@@ -267,9 +265,25 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         means_centered = self.means_ - np.mean(self.means_, axis=0)
 
         # Initialize projections
-        if self.verbose:
-            print("Initializing factors...")
-        self.weights_ = self._init(X, self.rank)
+        modes = [k + 1 for k in range(order)]
+        if isinstance(self.rank, int):
+            rank = [self.rank] * order
+        elif self.rank is None:
+            rank = shape
+        else:
+            rank = self.rank
+        if self.init == "mlsvd":
+            (_, self.weights_), _ = tl.decomposition.partial_tucker(
+                X_centered,
+                rank=rank,
+                modes=modes,
+            )
+        else:
+            _, self.weights_ = tl.decomposition._tucker.initialize_tucker(
+                X_centered, rank, modes, self.random_state, init=self.init
+            )
+
+        # Calculate total scatter
         scatter_x = [None] * order
         for k in range(order):
             scatter_x[k], _ = mode_scatter(
@@ -287,19 +301,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         # Initialze training information
         self.train_info_ = []
-        self.mode_train_info_ = []
 
         # Iteratively find projections
         if self.verbose:
-            print("Fitting discriminative Tucker model...")
+            print(f"Fitting discriminative Tucker model of rank {self.ml_rank_}...")
 
         iterator = range(self.max_iter)
         if self.verbose:
             iterator = tqdm(iterator)
         for self.iter_ in iterator:
-            new_weights = [None] * order
-
-            mode_rows = [dict(iteration=self.iter_, mode=k) for k in range(order)]
+            converged = True
             for k in range(order):
                 modes = range(1, order + 1)
                 X_centered_proj = tl.tenalg.multi_mode_dot(
@@ -355,58 +366,35 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     largest=largest,
                     **solver_params,
                 )
-                # Orthonormalize
-                u, _ = tl.qr(u, mode="reduced")
-                # sign = tl.sign(u[0, :])
-                # u = u * sign[np.newaxis, :]
+
+                # Calculate update and check convergence
+                update = tl.metrics.regression.MSE(u, self.weights_[k])
+                converged = update < self.tol and converged
 
                 # Store mode training information
-                if self.keep_train_info:
-                    obj = tl.sum(w)
-                    mode_rows[k]["objective"] = obj
-                    mode_rows[k]["shrinkage"] = shrinkage
-                    mode_rows[k]["rank"] = self.rank_(k)
-                new_weights[k] = u
+                train_info_row = dict()
+                train_info_row["iteration"] = self.iter_
+                train_info_row["mode"] = k
+                train_info_row["update"] = update
+                train_info_row["shrinkage"] = shrinkage
+                obj = tl.sum(w)
+                train_info_row["objective"] = obj
+                if self.extra_train_info:
+                    train_info_row.update(self._extra_train_info(X, y, class_counts))
+                self.train_info_.append(train_info_row)
 
-            # Update weights
-            old_weights = self.weights_
-            self.weights_ = new_weights
+                # Update weights
+                self.weights_[k] = u
 
-            # Calculate update
-            update = 0
-            for k in range(order):
-                u_old = old_weights[k]
-                u_new = self.weights_[k]
-                if u_old.shape != u_new.shape:
-                    mode_update = np.inf
-                else:
-                    mode_update = tl.mean((u_old - u_new) ** 2)
-                update += np.log(mode_update) / order
-                mode_rows[k]["update"] = mode_update
-            update = np.exp(update)
-            Xt = self.transform(X)
-
-            # Store iteration training information
-            info_row = dict()
-            if self.keep_train_info:
-                info_row = self._calc_train_info(X, Xt, y, class_counts)
-            info_row["iteration"] = self.iter_
-            info_row["update"] = update
-            self.train_info_.append(info_row)
-
-            self.mode_train_info_ += mode_rows
-
-            ## Check convergence
-            if update < self.tol:
+            # Exit if converged
+            if converged:
                 break
+
+        Xt = self.transform(X)
         self._fit_forward(X, Xt, y)
+
         # Convert train_info to dataframe
         self.train_info_ = pd.DataFrame(self.train_info_).astype(float)
-        self.train_info_.set_index(["iteration"], inplace=True)
-        self.mode_train_info_ = pd.DataFrame(self.mode_train_info_).astype(float)
-        self.mode_train_info_.set_index(["iteration", "mode"], inplace=True)
-        if self.verbose:
-            print(f"Fitted Tucker model of rank {self.ml_rank_} ...")
 
         return self
 
@@ -417,52 +405,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def ml_rank_(self):
         order = len(self.weights_)
         return tuple([self.rank_(k) for k in range(order)])
-
-    def _init(self, X, rank):
-        _, *shape = X.shape
-        order = len(shape)
-        if rank is None:
-            rank = [min(shape) for _ in range(order)]
-        elif isinstance(self.rank, int):
-            rank = [self.rank for _ in range(order)]
-
-        for k in range(order):
-            if rank[k] > shape[k]:
-                raise ValueError(
-                    f"rank {rank} is not smaller or equal than shape {shape}"
-                )
-
-        weights = [None] * order
-        if self.init == "mlsvd":
-            modes = tuple(range(1, order + 1))
-            (_, weights), _ = tl.decomposition.partial_tucker(
-                X,
-                rank=rank,
-                modes=modes,
-            )
-        else:
-            for k in range(order):
-                if self.init == "identity":
-                    weights[k] = tl.eye(shape[k], rank[k], dtype=X.dtype)
-                elif self.init == "ones":
-                    weights[k] = tl.ones((shape[k], rank[k]), dtype=X.dtype)
-                elif self.init == "random":
-                    weights[k] = tl_random.random_tensor(
-                        shape=(shape[k], rank[k]),
-                    )
-                    weights[k], _ = tl.qr(weights[k], mode="reduced")
-                elif self.init == "eye":
-                    weights[k] = tl.eye(shape[k], dtype=X.dtype)[:, : rank[k]]
-                elif self.init == "svd":
-                    Xk = tl.unfold(X, k + 1)
-                    weights[k], _, _ = tensorly.tenalg.svd_interface(
-                        Xk, n_eigenvecs=rank[k]
-                    )
-                else:
-                    raise ValueError(
-                        "init should be one of {identity, ones, random, svd}"
-                    )
-        return weights
 
     def _fit_forward(self, X, Xt, y):
         n_samples, *shape = X.shape
@@ -509,10 +451,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.scale_x_ = tl.mean(self.scale_x_)
         self.scale_g_ = tl.mean(self.scale_g_)
 
-    def _calc_train_info(self, X, Xt, y, class_counts):
-        row = dict()
+    def _extra_train_info(self, X, y, class_counts):
+        info = dict()
         n_samples = X.shape[0]
+        Xt = self.transform(X)
         self._fit_forward(X, Xt, y)
+
+        # Objective: multi-way F-score
+        # trace-ratio
         F_tr, _ = f_multiway(
             Xt,
             y,
@@ -520,8 +466,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             class_counts,
             method="tr",
         )
-        row["F_tr"] = F_tr
-
+        info["F_tr"] = F_tr
+        # ratio-trace
         F_rt, _ = f_multiway(
             Xt,
             y,
@@ -529,15 +475,19 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             class_counts,
             method="rt",
         )
+        info["F_rt"] = F_rt
 
-        row["F_rt"] = F_rt
+        # MSE
         X_rec = self.inv_transform(Xt)
-        row["mse"] = mse(X, X_rec)
-        row["log_like"] = log_likelihood(Xt, y)
+        info["mse"] = tl.metrics.regression.MSE(X, X_rec)
+        # Log-likelihood
+        info["log_like"] = log_likelihood(Xt, y)
+        # Information criteria
         k = math.prod(self.ml_rank_)
         for crit, func in info_crit.items():
-            row[crit] = func(n_samples, k, row["log_like"])
-        return row
+            info[crit] = func(n_samples, k, info["log_like"])
+
+        return info
 
     def transform(self, X, y=None):
         if not tl.is_tensor(X):
@@ -557,67 +507,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             / self.scale_g_
         )
 
-    #    def log_likelihood(self, X, y):
-    #        """
-    #        https://bcmi.sjtu.edu.cn/~zhangliqing/Papers/2009PRL_Lijie-TensorDiscriminant.pdf
-    #
-    #        Based on the Multilinear normal distribution and LDA
-    #
-    #        Ohlson, Martin, M. Rauf Ahmad, and Dietrich Von Rosen.
-    #        "The multilinear normal distribution: Introduction and some basic properties."
-    #        Journal of Multivariate Analysis 113 (2013): 37-47.
-    #        """
-    #        # The probabilistic tensor decomposition toolbox
-    #        #
-    #        # Jesper L Hinrich1,3
-    #        # , Kristoffer H Madsen1,2 and Morten Mørup1
-    #        #
-    #        # Published 17 June 2020 • © 2020 The Author(s). Published by IOP Publishing Ltd
-    #        n_samples, *shape = X.shape
-    #        order = len(shape)
-    #
-    #        X = tl.tensor(X.copy())
-    #        means_rec = self.inv_transform(self.transform(self.means_))
-    #        for ci, c in enumerate(self.classes_):
-    #            X[y == c] -= means_rec[ci]
-    #
-    #        X_rec = self.inv_transform(self.transform(X))
-    #        cov_x = [None] * order
-    #        for k in range(order):
-    #            cov_x[k], _ = mode_scatter(
-    #                X_rec,
-    #                k,
-    #                assume_centered=True,
-    #                shrinkage=self.shrinkage,
-    #                toeplitz=self.toeplitz,
-    #                taper=self.taper,
-    #            )
-    #            cov_x[k] /= n_samples * math.prod(shape) / shape[k] - 1
-    #        # cov_x = self.cov_x_.copy()
-    #        # for k in range(order):
-    #        #    cov_x[k] = (
-    #        #        self.aps_[k]
-    #        #        @ self.weights_[k].T
-    #        #        @ cov_x[k]
-    #        #        @ self.weights_[k]
-    #        #        @ self.aps_[k].T
-    #        #    )
-    #        cov_inv = [backend.np.linalg.pinv(c) for c in cov_x]
-    #        log_like = tl.zeros(n_samples)
-    #        log_like[:] += (-math.prod(shape) / 2) * tl.log(2 * np.pi)
-    #        for k in range(order):
-    #            sign, logdet = backend.np.linalg.slogdet(cov_x[k])
-    #            logdet = sign * logdet
-    #            log_like[:] += (-math.prod(shape) / (2 * shape[k])) * logdet
-    #        X_cov_inv = tl.tenalg.multi_mode_dot(X, cov_inv, modes=(1, 2))
-    #        for i in range(n_samples):
-    #            log_like[i] += -0.5 * tl.tenalg.tensordot(
-    #                X_cov_inv[i],
-    #                X[i],
-    #                modes=[(0, 1), (0, 1)],
-    #            )
-    #        return tl.sum(log_like)
-
     @property
     def n_params_(self):
         return sum([s.size for s in self.weights_])
@@ -629,21 +518,21 @@ class BTTDA(BaseEstimator, TransformerMixin):
         max_blocks=8,
         info_crit="bic",
         hoda_params=None,
-        keep_train_info=False,
+        extra_train_info=False,
         verbose=False,
     ):
         self.max_blocks = max_blocks
         self.hoda_params = hoda_params
         self.info_crit = info_crit
         self.verbose = verbose
-        self.keep_train_info = keep_train_info
+        self.extra_train_info = extra_train_info
 
     def fit(self, X, y=None):
         X = tl.tensor(X.copy())
         n_samples, *shape = X.shape
         hoda_params = self.hoda_params or dict()
         self.blocks_ = []
-        if self.keep_train_info:
+        if self.extra_train_info:
             self.train_info_ = []
 
         crit_value = np.inf
@@ -668,7 +557,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
                     Xtb = new_block.transform(err)
                     Xtb = Xtb.reshape((n_samples, -1))
                     if b > 1:
-                        new_Xt = backend.np.hstack([Xt, Xtb])
+                        new_Xt = tl.concatenate([Xt, Xtb], axis=-1)
                     else:
                         new_Xt = Xtb
                     new_Xt = Xtb
@@ -682,7 +571,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
                     block = new_block
                     crit_value = new_crit_value
 
-                    # if new_crit_value < crit_value:
+                    # if new_crit_value < crit_value
                     #    block = new_block
                     #    crit_value = new_crit_value
 
@@ -695,7 +584,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             self.blocks_.append(block)
             G = block.transform(err)
             err -= block.inv_transform(G)
-            if self.keep_train_info:
+            if self.extra_train_info:
                 row = dict()
                 row["block"] = self.n_blocks_
                 Xt = self.transform(X)
@@ -708,11 +597,10 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 row["mse"] = float(tl.mean((err) ** 2))
                 self.train_info_.append(row)
 
-        if self.keep_train_info:
+        if self.extra_train_info:
             self.train_info_ = pd.DataFrame(self.train_info_)
             self.train_info_.set_index(["block"], inplace=True)
 
-        print(self.block_rank_)
         return self
 
     @property

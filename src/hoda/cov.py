@@ -5,7 +5,7 @@ import numpy as np
 import tensorly as tl
 from sklearn.base import BaseEstimator
 
-import hoda.backend as backend
+from hoda.backend import toeplitz
 
 try:
     import cupy
@@ -50,19 +50,26 @@ def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
 ):
     """Calculate the scatter matrix along a given tensor mode"""
+    _, *shape = X.shape
+    order = len(shape)
+    n_features = shape[k]
     if weights is not None:
         X = (X.T * weights).T
-    # elif shrinkage == "oas":
-    #    X = tl.unfold(X, k + 1)
-    #    scatter, shrinkage = oas(tl.to_numpy(X.T), assume_centered=assume_centered)
-    #    scatter = tl.tensor(scatter)
-    #    scatter *= X.shape[1] - 1
+    # Determine mode scatter
+    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+    if not assume_centered:
+        X = X - tl.mean(X, axis=0)
+    scatter = tl.tensordot(X, X.conj(), axes=(modes, modes))
+    # Force Toeplitz
+    if toeplitz is not None and k in toeplitz:
+        scatter = force_toeplitz(scatter, taper=taper)
+    # Determine shrinkage
     if shrinkage == "lw":
         Xf = tl.unfold(X, k + 1).T
         shrinkage = ledoit_wolf_shrinkage(Xf, assume_centered=assume_centered)
     elif shrinkage == "oas":
         Xf = tl.unfold(X, k + 1).T
-        shrinkage = oas(Xf, assume_centered=assume_centered)
+        shrinkage = oas(Xf, assume_centered=assume_centered, emp_cov=scatter)
     elif shrinkage == "ell1":
         raise NotImplementedError
     elif shrinkage == "ell2":
@@ -73,17 +80,11 @@ def mode_scatter(
         raise NotImplementedError
     elif shrinkage == "loocv":
         raise NotImplementedError
-
-    order = len(X.shape[1:])
-    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-    if not assume_centered:
-        X = X - tl.mean(X, axis=0)
-    scatter = tl.tensordot(X, X.conj(), axes=(modes, modes))
-    structured = tl.mean(tl.diag(scatter)) * tl.eye(scatter.shape[0], dtype=X.dtype)
+    # Shrink
+    structured = (tl.trace(scatter) / n_features) * tl.eye(
+        scatter.shape[0], dtype=X.dtype
+    )
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
-    if toeplitz is not None and k in toeplitz:
-        scatter = force_toeplitz(scatter, taper=taper)
-
     return scatter, shrinkage
 
 
@@ -96,29 +97,7 @@ def force_toeplitz(A, taper=False):
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper
-    return backend.scipy.linalg.toeplitz(toep)
-
-
-def kron_pca(cov, n_components=2, outer=-1, inner=-1):
-    cov_pvl = pvl_perm(cov, outer, inner)
-    pass
-
-
-def pvl_perm(cov, outer=-1, inner=-1):
-    """Pitsianis-Van Loan permtation"""
-    if outer == inner == -1:
-        raise ValueError("Either outer or inner dimension be specified")
-    total = cov.shape[0]
-    if outer == -1:
-        outer = total // inner
-    if inner == -1:
-        inner = total // outer
-    cov_pvl = tl.zeros((outer * outer, inner * inner))
-    for o1 in range(outer):
-        for o2 in range(outer):
-            block = cov[o1 * inner : (o1 + 1) * inner, o2 * inner : (o2 + 1) * inner]
-            cov_pvl[o1 * outer + o2] = block.flatten()
-    return cov_pvl
+    return toeplitz(toep)
 
 
 def ledoit_wolf_shrinkage(X, assume_centered=False, block_size=1000):
