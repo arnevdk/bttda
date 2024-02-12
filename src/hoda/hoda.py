@@ -1,4 +1,5 @@
 import math
+import warnings
 
 import ipdb
 import numpy as np
@@ -105,7 +106,9 @@ def norm_fro(A):
 
 def f_multiway(X, y, classes=None, class_counts=None, method="tr"):
     n_samples, *shape = X.shape
-    X = tl.tensor(X, dtype=X.dtype)
+
+    if not tl.is_tensor(X):
+        X = tl.tensor(X, dtype=X.dtype)
     if classes is None or class_counts is None:
         classes, class_counts = np.unique(y, return_counts=True)
     # Calculate class means, overall class mean and center data
@@ -178,12 +181,7 @@ def trunc_eigh(
     """
     solver_params = solver_params or dict()
     if method == "lanczos":
-        try:
-            v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
-        except LinAlgError:
-            v, w = v, w = lanczos(
-                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
-            )
+        v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
 
     elif method == "svd":
         solver_params.setdefault("method", "truncated_svd")
@@ -202,13 +200,14 @@ def trunc_eigh(
     elif method == "lobpcg":
         init = solver_params.pop("init", tl.eye(A.shape[0], dtype=A.dtype))
         init = init[:, :rank]
-        try:
-            w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
-        except (LinAlgError, AttributeError):
-            v, w = lanczos(
-                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
-            )
-
+        w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
+    else:
+        raise ValueError("Solver must be one of ['lanczos', 'lobpcg', 'svd']")
+    # Flip sign
+    sign = tl.sign(v[0, :])
+    v *= sign
+    # Normalize
+    v = v / tl.norm(v)
     return v, w
 
 
@@ -279,6 +278,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 modes=modes,
             )
         else:
+            # TODO bug for random initialization
             _, self.weights_ = tl.decomposition._tucker.initialize_tucker(
                 X_centered, rank, modes, self.random_state, init=self.init
             )
@@ -353,16 +353,18 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     solver_params["init"] = self.weights_[k]
                 u, w = trunc_eigh(
                     A,
-                    B,
+                    B=B,
                     rank=self.rank_(k),
                     method=self.solver,
                     largest=largest,
                     **solver_params,
                 )
+                if self.solver == "lobpcg":
+                    solver_params["init"] = u
                 u, w = trunc_eigh(
                     u @ u.T @ (scatter_x[k]) @ u @ u.T,
                     rank=self.rank_(k),
-                    method="lanczos",
+                    method=self.solver,
                     largest=largest,
                     **solver_params,
                 )
@@ -556,10 +558,10 @@ class BTTDA(BaseEstimator, TransformerMixin):
                     new_block.fit(err, y)
                     Xtb = new_block.transform(err)
                     Xtb = Xtb.reshape((n_samples, -1))
-                    if b > 1:
-                        new_Xt = tl.concatenate([Xt, Xtb], axis=-1)
-                    else:
-                        new_Xt = Xtb
+                    # if b > 1:
+                    #    new_Xt = tl.concatenate([Xt, Xtb], axis=-1)
+                    # else:
+                    #    new_Xt = Xtb
                     new_Xt = Xtb
                     new_log_like = log_likelihood(new_Xt, y)
                     new_n_params = new_Xt.shape[-1]
@@ -612,7 +614,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return sum([b.n_params_ for b in self.blocks_])
 
     def transform(self, X, y=None, n_blocks=None):
-        X = tl.tensor(X.copy(), dtype=X.dtype)
+        if not tl.is_tensor(X):
+            X = tl.tensor(X.copy(), dtype=X.dtype)
         n_samples, *_ = X.shape
         Xt = []
         if n_blocks is None:

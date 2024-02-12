@@ -4,6 +4,7 @@ try:
     import cupy
     import cupyx.scipy
     import cupyx.scipy.linalg
+    import cupyx.scipy.sparse.linalg
 except ImportError:
     pass
 
@@ -20,7 +21,7 @@ def lanczos(*args, **kwargs):
         raise NotImplementedError
 
 
-def lanczos_numpy(A, B=None, rank=None, largest=True, **kwargs):
+def lanczos_numpy(A, B=None, rank=None, largest=True, init=None, **kwargs):
     if largest:
         n = A.shape[0]
         subset = [n - rank, n - 1]
@@ -30,7 +31,7 @@ def lanczos_numpy(A, B=None, rank=None, largest=True, **kwargs):
     return v, w
 
 
-def lanczos_cupy(A, B=None, rank=None, largest=True, force_spd=False, **kwargs):
+def lanczos_cupy(A, B=None, rank=None, largest=True, force_spd=False, init=None):
     if rank is None:
         rank = A.shape[0]
     if B is not None:
