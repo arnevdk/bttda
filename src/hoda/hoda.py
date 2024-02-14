@@ -324,7 +324,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         # Iteratively find projections
         if self.verbose:
-            print(f"Fitting discriminative Tucker model of rank {self.ml_rank_}...")
+            print(f"Fitting discriminative Tucker model of rank {self.rank_}...")
 
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
@@ -374,7 +374,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 u, w = trunc_eigh(
                     A,
                     B=B,
-                    rank=self.rank_(k),
+                    rank=self.rank_[k],
                     method=self.solver,
                     largest=largest,
                     **solver_params,
@@ -383,7 +383,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     solver_params["init"] = u
                 u, w = trunc_eigh(
                     u @ u.T @ (scatter_x[k]) @ u @ u.T,
-                    rank=self.rank_(k),
+                    rank=self.rank_[k],
                     method=self.solver,
                     largest=largest,
                     **solver_params,
@@ -419,13 +419,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         return self
 
-    def rank_(self, k):
-        return self.weights_[k].shape[-1]
-
     @property
-    def ml_rank_(self):
+    def rank_(self):
         order = len(self.weights_)
-        return tuple([self.rank_(k) for k in range(order)])
+        return tuple([self.weights_[k].shape[-1] for k in range(order)])
 
     def _fit_forward(self, X, Xt, y):
         n_samples, *shape = X.shape
@@ -457,12 +454,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             scale_x = (tl.trace(cov_x) / shape[k]) / (
                 n_samples * math.prod(shape) / shape[k] - 1
             )
-            scale_g = (tl.trace(cov_g) / self.ml_rank_[k]) / (
-                n_samples * math.prod(self.ml_rank_) / self.rank_(k) - 1
+            scale_g = (tl.trace(cov_g) / self.rank_[k]) / (
+                n_samples * math.prod(self.rank_) / self.rank_[k] - 1
             )
 
             cov_x /= tl.trace(cov_x) / shape[k]
-            cov_g /= tl.trace(cov_g) / self.ml_rank_[k]
+            cov_g /= tl.trace(cov_g) / self.rank_[k]
 
             self.cov_g_[k] = cov_g
             self.cov_x_[k] = cov_x
@@ -563,14 +560,13 @@ class BTTDA(BaseEstimator, TransformerMixin):
             # Store train info
             row = dict()
             row["block"] = self.n_blocks_
-            row["rank"] = block.ml_rank_
+            row["rank"] = block.rank_
             if self.extra_train_info:
                 row["mse"] = float(tl.mean((err) ** 2))
             self.train_info_.append(row)
 
-        if self.extra_train_info:
-            self.train_info_ = pd.DataFrame(self.train_info_)
-            self.train_info_.set_index(["block"], inplace=True)
+        self.train_info_ = pd.DataFrame(self.train_info_)
+        self.train_info_.set_index(["block"], inplace=True)
 
         return self
 
@@ -607,16 +603,16 @@ class BTTDA(BaseEstimator, TransformerMixin):
         X = tl.zeros(shape)
         for b in range(n_blocks):
             block = self.blocks_[b]
-            n_features = math.prod(block.ml_rank_)
+            n_features = math.prod(block.rank_)
             Xtb = Xt[:, :n_features]
-            Xtb = Xtb.reshape((n_samples, *block.ml_rank_))
+            Xtb = Xtb.reshape((n_samples, *block.rank_))
             X += block.inv_transform(Xtb)
             Xt = Xt[:, n_features:]
         return X
 
     @property
-    def block_rank_(self):
-        return tuple([b.ml_rank_ for b in self.blocks_])
+    def ranks_(self):
+        return tuple([b.rank_ for b in self.blocks_])
 
 
 class GreedyBTTDA(BTTDA):
@@ -627,12 +623,15 @@ class GreedyBTTDA(BTTDA):
         verbose=False,
         max_blocks=8,
         gs_params=None,
+        truncate=True,
     ):
         super().__init__(
-            hoda_params=hoda_params, extra_train_info=extra_train_info, verbose=verbose
+            hoda_params=hoda_params, extra_train_info=extra_train_info, verbose=False
         )
         self.max_blocks = max_blocks
         self.gs_params = gs_params
+        self.sub_verbose = verbose
+        self.truncate = truncate
 
     def fit(self, X, y=None):
         _, *shape = X.shape
@@ -640,26 +639,38 @@ class GreedyBTTDA(BTTDA):
         gs_params.setdefault("scoring", "roc_auc")
         gs_params["refit"] = True
 
-        self.ranks_ = []
-        self.blocks_ = None
-        self.train_info_ = None
+        self.blocks_ = []
         for b in range(self.max_blocks):
+            if self.sub_verbose:
+                print(f"Fitting block {b+1}/{self.max_blocks}...")
             pipe = self._build_clf_pipe()
             param_grid = dict(
-                bttda__ranks=[self.ranks_ + [r] for r in range(1, min(shape) + 1)]
+                # bttda__ranks=(*self.ranks_,r) for r in range(1, min(shape) + 1)]
+                bttda__ranks=[
+                    (*self.ranks_, r)
+                    for r in list(
+                        2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
+                    )
+                ]
             )
             gs = GridSearchCV(pipe, param_grid, **gs_params)
             gs.fit(X, y, bttda__blocks=self.blocks_)
             bttda = gs.best_estimator_["bttda"]
             self.blocks_ = bttda.blocks_
-            if self.train_info_ is None:
+            if not b:
                 self.train_info_ = bttda.train_info_
             else:
                 score = self.train_info_["score"]
                 self.train_info_ = bttda.train_info_
                 self.train_info_["score"] = score
             self.train_info_.loc[b + 1, "score"] = gs.best_score_
-            self.ranks_ = gs.best_params_["bttda__ranks"]
+
+        if self.truncate:
+            n_blocks = self.train_info_["score"].idxmax()
+            self.blocks_ = self.blocks_[:n_blocks]
+            self.train_info_ = self.train_info_[:n_blocks]
+            if self.sub_verbose:
+                print(f"Retaining {n_blocks} blocks")
         return self
 
     def _build_clf_pipe(self):
