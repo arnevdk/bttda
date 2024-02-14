@@ -526,130 +526,43 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return sum([s.size for s in self.weights_])
 
 
-class Debug(BaseEstimator, TransformerMixin):
-
-    def transform(self, X):
-        print(X.shape)
-        return X
-
-    def fit(self, X, y=None, **fit_params):
-        return self
-
-
 class BTTDA(BaseEstimator, TransformerMixin):
     def __init__(
         self,
-        n_blocks=8,
+        ranks=None,
         hoda_params=None,
-        gs_params=None,
         extra_train_info=False,
         verbose=False,
     ):
-        self.n_blocks = n_blocks
         self.hoda_params = hoda_params
-        self.gs_params = gs_params
+        self.ranks = ranks
         self.verbose = verbose
         self.extra_train_info = extra_train_info
 
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, blocks=None):
         X = tl.tensor(X)
         n_samples, *shape = X.shape
         hoda_params = self.hoda_params or dict()
         self.blocks_ = []
         self.train_info_ = []
 
-        gs_params = self.gs_params or dict()
-        gs_params["refit"] = True
-        gs_params.setdefault("scoring", "roc_auc")
-
         err = X.copy()
-        last_score = 0
-        if self.n_blocks is None:
-            # TODO replace with while loop
-            iterator = range(1, 1001)
-        else:
-            iterator = range(1, self.n_blocks + 1)
-        for b in iterator:
-            if self.verbose:
-                print(f"Fitting block {b}/{self.n_blocks}...")
-
-            err_flat = err.reshape(n_samples, -1)
-            if self.n_blocks_:
-                Xt = self.transform(X)
-                Xt_err = tl.concatenate([Xt, err_flat], axis=-1)
-                Xt_len = Xt.shape[-1]
+        for b, rank in enumerate(self.ranks):
+            hoda_params["rank"] = rank
+            if blocks is not None and b < len(blocks):
+                # TODO error if ranks are not equal
+                block = blocks[b]
             else:
-                Xt_err = err_flat
-                Xt_len = 0
-            union = [
-                (
-                    "err",
-                    Pipeline(
-                        [
-                            (
-                                "err",
-                                FunctionTransformer(
-                                    lambda x: x[:, Xt_len:].reshape(-1, *shape)
-                                ),
-                            ),
-                            ("hoda", HODA(**hoda_params)),
-                            ("vec", Vectorize()),
-                        ]
-                    ),
-                ),
-            ]
-            if self.n_blocks_:
-                union += [
-                    (
-                        "Xt",
-                        Pipeline(
-                            [
-                                (
-                                    (
-                                        "Xt",
-                                        FunctionTransformer(lambda x: x[:, :Xt_len]),
-                                    )
-                                ),
-                                ("vec", Vectorize()),
-                            ]
-                        ),
-                    ),
-                ]
-            union = FeatureUnion(union)
-
-            pipe = Pipeline(
-                [
-                    ("union", union),
-                    ("debug", Debug()),
-                    (
-                        "lda",
-                        LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
-                    ),
-                ]
-            )
-            search_space = list(
-                2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
-            )
-            # search_space = range(1, min(shape) + 1)
-            gs = GridSearchCV(
-                pipe, param_grid=dict(union__err__hoda__rank=search_space), **gs_params
-            )
-            gs.fit(Xt_err, y)
-            print(gs.best_score_)
-            block = gs.best_estimator_["union"]["err"]["hoda"]
-            block.fit(err, y)
-
-            if self.n_blocks is None and gs.best_score_ <= last_score:
-                break
-            last_score = gs.best_score_
-
+                if self.verbose:
+                    print(f"Fitting block {b+1}/{len(self.ranks)}...")
+                block = HODA(**hoda_params)
+                block.fit(err, y)
             self.blocks_.append(block)
             G = block.transform(err)
             err = err - block.inv_transform(G)
             # Store train info
             row = dict()
             row["block"] = self.n_blocks_
-            row["score"] = gs.best_score_
             row["rank"] = block.ml_rank_
             if self.extra_train_info:
                 row["mse"] = float(tl.mean((err) ** 2))
@@ -704,3 +617,59 @@ class BTTDA(BaseEstimator, TransformerMixin):
     @property
     def block_rank_(self):
         return tuple([b.ml_rank_ for b in self.blocks_])
+
+
+class GreedyBTTDA(BTTDA):
+    def __init__(
+        self,
+        hoda_params=None,
+        extra_train_info=False,
+        verbose=False,
+        max_blocks=8,
+        gs_params=None,
+    ):
+        super().__init__(
+            hoda_params=hoda_params, extra_train_info=extra_train_info, verbose=verbose
+        )
+        self.max_blocks = max_blocks
+        self.gs_params = gs_params
+
+    def fit(self, X, y=None):
+        _, *shape = X.shape
+        gs_params = self.gs_params or dict()
+        gs_params.setdefault("scoring", "roc_auc")
+        gs_params["refit"] = True
+
+        self.ranks_ = []
+        self.blocks_ = None
+        self.train_info_ = None
+        for b in range(self.max_blocks):
+            pipe = self._build_clf_pipe()
+            param_grid = dict(
+                bttda__ranks=[self.ranks_ + [r] for r in range(1, min(shape) + 1)]
+            )
+            gs = GridSearchCV(pipe, param_grid, **gs_params)
+            gs.fit(X, y, bttda__blocks=self.blocks_)
+            bttda = gs.best_estimator_["bttda"]
+            self.blocks_ = bttda.blocks_
+            if self.train_info_ is None:
+                self.train_info_ = bttda.train_info_
+            else:
+                score = self.train_info_["score"]
+                self.train_info_ = bttda.train_info_
+                self.train_info_["score"] = score
+            self.train_info_.loc[b + 1, "score"] = gs.best_score_
+            self.ranks_ = gs.best_params_["bttda__ranks"]
+        return self
+
+    def _build_clf_pipe(self):
+        params = {
+            k: v
+            for k, v in self.get_params().items()
+            if k in BTTDA().get_params().keys()
+        }
+        return make_pipeline(
+            BTTDA(**params),
+            Vectorize(),
+            LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
+        )
