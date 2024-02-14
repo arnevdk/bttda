@@ -212,7 +212,7 @@ def trunc_eigh(
         init = init[:, :rank]
         try:
             w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
-        except (AttributeError, LinAlgError) as e:
+        except (AttributeError, LinAlgError, Exception, ValueError) as e:
             warnings.warn(
                 f"lobpcg failed with error {e}, falling back to lanczos solver with SPD constraint"
             )
@@ -526,6 +526,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return sum([s.size for s in self.weights_])
 
 
+class Debug(BaseEstimator, TransformerMixin):
+
+    def transform(self, X):
+        print(X.shape)
+        return X
+
+    def fit(self, X, y=None, **fit_params):
+        return self
+
+
 class BTTDA(BaseEstimator, TransformerMixin):
     def __init__(
         self,
@@ -569,9 +579,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 Xt_err = tl.concatenate([Xt, err_flat], axis=-1)
                 Xt_len = Xt.shape[-1]
             else:
-                Xt_err = err
+                Xt_err = err_flat
                 Xt_len = 0
-
             union = [
                 (
                     "err",
@@ -611,6 +620,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             pipe = Pipeline(
                 [
                     ("union", union),
+                    ("debug", Debug()),
                     (
                         "lda",
                         LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
@@ -620,10 +630,12 @@ class BTTDA(BaseEstimator, TransformerMixin):
             search_space = list(
                 2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
             )
+            # search_space = range(1, min(shape) + 1)
             gs = GridSearchCV(
                 pipe, param_grid=dict(union__err__hoda__rank=search_space), **gs_params
             )
             gs.fit(Xt_err, y)
+            print(gs.best_score_)
             block = gs.best_estimator_["union"]["err"]["hoda"]
             block.fit(err, y)
 
@@ -633,7 +645,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
             self.blocks_.append(block)
             G = block.transform(err)
-            err -= block.inv_transform(G)
+            err = err - block.inv_transform(G)
             # Store train info
             row = dict()
             row["block"] = self.n_blocks_

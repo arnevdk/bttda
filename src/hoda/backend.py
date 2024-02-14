@@ -23,7 +23,9 @@ def lanczos(*args, **kwargs):
         raise NotImplementedError
 
 
-def lanczos_numpy(A, B=None, rank=None, largest=True, init=None, **kwargs):
+def lanczos_numpy(
+    A, B=None, rank=None, largest=True, init=None, force_spd=False, **kwargs
+):
     if largest:
         n = A.shape[0]
         subset = [n - rank, n - 1]
