@@ -5,10 +5,12 @@ try:
     import cupyx.scipy
     import cupyx.scipy.linalg
     import cupyx.scipy.sparse.linalg
+    import cupyx.scipy.special
 except ImportError:
     pass
 
 import scipy.linalg
+import scipy.special
 import tensorly as tl
 
 
@@ -79,5 +81,14 @@ def toeplitz(*args, **kwargs):
         return scipy.linalg.toeplitz(*args, **kwargs)
     elif tl.get_backend() == "cupy":
         return cupyx.scipy.linalg.toeplitz(*args, **kwargs)
+    else:
+        raise NotImplementedError
+
+
+def fdtrc(*args):
+    if tl.get_backend() == "numpy":
+        return scipy.special.fdtrc(*args)
+    elif tl.get_backend() == "cupy":
+        return scipy.special.fdtrc(*args)
     else:
         raise NotImplementedError

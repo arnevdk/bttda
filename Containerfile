@@ -1,4 +1,3 @@
-#FROM cupy/cupy:latest
 FROM cupy/cupy:v13.0.0b1
 
 WORKDIR /project

@@ -11,13 +11,14 @@ from numpy.linalg import LinAlgError
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import log_loss
-from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
+                                     cross_validate)
+from sklearn.pipeline import FeatureUnion, Pipeline, make_pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
-from hoda.backend import lanczos, lobpcg
+from hoda.backend import fdtrc, lanczos, lobpcg
 from hoda.classification import SelectFweAtLeastOne, Vectorize
 from hoda.cov import center, mode_scatter
 
@@ -135,8 +136,10 @@ def f_multiway(X, y, classes=None, class_counts=None, method="tr"):
         _, w = trunc_eigh(scatter_b, scatter_w, rank=None, method="lanczos")
         F = tl.sum(w)
     else:
-        raise AttributeError
-    return F, 0
+        raise ValueError(
+            "method must be eiter 'tr' (trace-ratio) or 'rt' (ratio-trace)"
+        )
+    return F
 
 
 def f_oneway(X, y, classes=None, class_counts=None):
@@ -164,7 +167,8 @@ def f_oneway(X, y, classes=None, class_counts=None):
     msb = ssbn / dfbn
     msw = sswn / dfwn
     F = msb / msw
-    return F
+    p = fdtrc(dfbn, dfwn, F)
+    return F, p
 
 
 def trunc_eigh(
@@ -181,7 +185,13 @@ def trunc_eigh(
     """
     solver_params = solver_params or dict()
     if method == "lanczos":
-        v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
+        try:
+            v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
+        except LinAlgError as e:
+            warnings.warn(f"lanczos failed with error {e}")
+            v, w = lanczos(
+                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
+            )
 
     elif method == "svd":
         solver_params.setdefault("method", "truncated_svd")
@@ -200,7 +210,15 @@ def trunc_eigh(
     elif method == "lobpcg":
         init = solver_params.pop("init", tl.eye(A.shape[0], dtype=A.dtype))
         init = init[:, :rank]
-        w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
+        try:
+            w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
+        except (AttributeError, LinAlgError) as e:
+            warnings.warn(
+                f"lobpcg failed with error {e}, falling back to lanczos solver with SPD constraint"
+            )
+            v, w = lanczos(
+                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
+            )
     else:
         raise ValueError("Solver must be one of ['lanczos', 'lobpcg', 'svd']")
     # Flip sign
@@ -265,7 +283,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         # Initialize projections
         modes = [k + 1 for k in range(order)]
-        if isinstance(self.rank, int):
+        if isinstance(self.rank, np.integer) or isinstance(self.rank, int):
             rank = [self.rank] * order
         elif self.rank is None:
             rank = shape
@@ -282,6 +300,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             _, self.weights_ = tl.decomposition._tucker.initialize_tucker(
                 X_centered, rank, modes, self.random_state, init=self.init
             )
+        for k in range(order):
+            self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
 
         # Calculate total scatter
         scatter_x = [None] * order
@@ -306,7 +326,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if self.verbose:
             print(f"Fitting discriminative Tucker model of rank {self.ml_rank_}...")
 
-        iterator = range(self.max_iter)
+        iterator = range(1, self.max_iter + 1)
         if self.verbose:
             iterator = tqdm(iterator)
         for self.iter_ in iterator:
@@ -350,7 +370,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     scatter_b, scatter_w, self.weights_[k]
                 )
                 if self.solver == "lobpcg":
-                    solver_params["init"] = self.weights_[k]
+                    solver_params["init"] = self.weights_[k].copy()
                 u, w = trunc_eigh(
                     A,
                     B=B,
@@ -372,6 +392,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 # Calculate update and check convergence
                 update = tl.metrics.regression.MSE(u, self.weights_[k])
                 converged = update < self.tol and converged
+                self.weights_[k] = u
 
                 # Store mode training information
                 train_info_row = dict()
@@ -386,8 +407,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 self.train_info_.append(train_info_row)
 
                 # Update weights
-                self.weights_[k] = u
-
             # Exit if converged
             if converged:
                 break
@@ -482,13 +501,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # MSE
         X_rec = self.inv_transform(Xt)
         info["mse"] = tl.metrics.regression.MSE(X, X_rec)
-        # Log-likelihood
-        info["log_like"] = log_likelihood(Xt, y)
-        # Information criteria
-        k = math.prod(self.ml_rank_)
-        for crit, func in info_crit.items():
-            info[crit] = func(n_samples, k, info["log_like"])
-
         return info
 
     def transform(self, X, y=None):
@@ -517,87 +529,119 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 class BTTDA(BaseEstimator, TransformerMixin):
     def __init__(
         self,
-        max_blocks=8,
-        info_crit="bic",
+        n_blocks=8,
         hoda_params=None,
+        gs_params=None,
         extra_train_info=False,
         verbose=False,
     ):
-        self.max_blocks = max_blocks
+        self.n_blocks = n_blocks
         self.hoda_params = hoda_params
-        self.info_crit = info_crit
+        self.gs_params = gs_params
         self.verbose = verbose
         self.extra_train_info = extra_train_info
 
     def fit(self, X, y=None):
-        X = tl.tensor(X.copy())
+        X = tl.tensor(X)
         n_samples, *shape = X.shape
         hoda_params = self.hoda_params or dict()
         self.blocks_ = []
-        if self.extra_train_info:
-            self.train_info_ = []
+        self.train_info_ = []
 
-        crit_value = np.inf
+        gs_params = self.gs_params or dict()
+        gs_params["refit"] = True
+        gs_params.setdefault("scoring", "roc_auc")
+
         err = X.copy()
-
-        for b in range(1, self.max_blocks + 1):
+        last_score = 0
+        if self.n_blocks is None:
+            # TODO replace with while loop
+            iterator = range(1, 1001)
+        else:
+            iterator = range(1, self.n_blocks + 1)
+        for b in iterator:
             if self.verbose:
-                print(f"Fitting block {b}/{self.max_blocks}...")
+                print(f"Fitting block {b}/{self.n_blocks}...")
 
-            if self.info_crit is not None:
-                block = None
-                if b > 1:
-                    Xt = self.transform(X)
-                else:
-                    Xt = None
-
-                crit_value = np.inf
-                for r in range(1, min(shape) + 1):
-                    hoda_params["rank"] = r
-                    new_block = HODA(**hoda_params)
-                    new_block.fit(err, y)
-                    Xtb = new_block.transform(err)
-                    Xtb = Xtb.reshape((n_samples, -1))
-                    # if b > 1:
-                    #    new_Xt = tl.concatenate([Xt, Xtb], axis=-1)
-                    # else:
-                    #    new_Xt = Xtb
-                    new_Xt = Xtb
-                    new_log_like = log_likelihood(new_Xt, y)
-                    new_n_params = new_Xt.shape[-1]
-                    new_crit_value = info_crit[self.info_crit](
-                        n_samples, new_n_params, new_log_like
-                    )
-                    if new_crit_value >= crit_value:
-                        break
-                    block = new_block
-                    crit_value = new_crit_value
-
-                    # if new_crit_value < crit_value
-                    #    block = new_block
-                    #    crit_value = new_crit_value
-
-                if block is None:
-                    break
+            err_flat = err.reshape(n_samples, -1)
+            if self.n_blocks_:
+                Xt = self.transform(X)
+                Xt_err = tl.concatenate([Xt, err_flat], axis=-1)
+                Xt_len = Xt.shape[-1]
             else:
-                block = HODA(**hoda_params)
-                block.fit(err, y)
+                Xt_err = err
+                Xt_len = 0
+
+            union = [
+                (
+                    "err",
+                    Pipeline(
+                        [
+                            (
+                                "err",
+                                FunctionTransformer(
+                                    lambda x: x[:, Xt_len:].reshape(-1, *shape)
+                                ),
+                            ),
+                            ("hoda", HODA(**hoda_params)),
+                            ("vec", Vectorize()),
+                        ]
+                    ),
+                ),
+            ]
+            if self.n_blocks_:
+                union += [
+                    (
+                        "Xt",
+                        Pipeline(
+                            [
+                                (
+                                    (
+                                        "Xt",
+                                        FunctionTransformer(lambda x: x[:, :Xt_len]),
+                                    )
+                                ),
+                                ("vec", Vectorize()),
+                            ]
+                        ),
+                    ),
+                ]
+            union = FeatureUnion(union)
+
+            pipe = Pipeline(
+                [
+                    ("union", union),
+                    (
+                        "lda",
+                        LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
+                    ),
+                ]
+            )
+            search_space = list(
+                2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
+            )
+            gs = GridSearchCV(
+                pipe, param_grid=dict(union__err__hoda__rank=search_space), **gs_params
+            )
+            gs.fit(Xt_err, y)
+            block = gs.best_estimator_["union"]["err"]["hoda"]
+            block.fit(err, y)
+
+            if self.n_blocks is None and gs.best_score_ <= last_score:
+                break
+            last_score = gs.best_score_
 
             self.blocks_.append(block)
             G = block.transform(err)
             err -= block.inv_transform(G)
+            # Store train info
+            row = dict()
+            row["block"] = self.n_blocks_
+            row["score"] = gs.best_score_
+            row["rank"] = block.ml_rank_
             if self.extra_train_info:
-                row = dict()
-                row["block"] = self.n_blocks_
-                Xt = self.transform(X)
-                row["log_like"] = log_likelihood(Xt, y)
-                row["n_params"] = self.n_params_
-                k = Xt.shape[-1]
-                for crit, func in info_crit.items():
-                    row[crit] = float(func(n_samples, k, row["log_like"]))
-                row["rank"] = block.ml_rank_
                 row["mse"] = float(tl.mean((err) ** 2))
-                self.train_info_.append(row)
+            self.train_info_.append(row)
 
         if self.extra_train_info:
             self.train_info_ = pd.DataFrame(self.train_info_)
@@ -615,7 +659,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None, n_blocks=None):
         if not tl.is_tensor(X):
-            X = tl.tensor(X.copy(), dtype=X.dtype)
+            X = tl.tensor(X, dtype=X.dtype)
         n_samples, *_ = X.shape
         Xt = []
         if n_blocks is None:
@@ -648,33 +692,3 @@ class BTTDA(BaseEstimator, TransformerMixin):
     @property
     def block_rank_(self):
         return tuple([b.ml_rank_ for b in self.blocks_])
-
-
-def bic(n, k, log_like):
-    return k * tl.log(n) - 2 * log_like
-
-
-def aic(_, k, log_like):
-    return 2 * k - 2 * log_like
-
-
-def aicc(n, k, log_like):
-    return aic(n, k, log_like) + (2 * k**2 + 2 * k) / (n - k - 1)
-
-
-info_crit = dict(
-    bic=bic,
-    aic=aic,
-    aicc=aicc,
-)
-
-
-def log_likelihood(Xt, y):
-    clf = make_pipeline(
-        Vectorize(),
-        # SelectFweAtLeastOne(),
-        LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
-    )
-    clf.fit(Xt, y)
-    proba = clf.predict_proba(Xt)
-    return -log_loss(y, proba, normalize=False)
