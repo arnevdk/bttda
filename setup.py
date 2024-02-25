@@ -16,6 +16,7 @@ setup(
     extras_require={
         "experiments": [
             "moabb==1.0.0",
+            "dask",
             "jupyter",
             "seaborn",
         ]

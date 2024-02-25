@@ -20,7 +20,7 @@ def center(X, y, classes=None):
         classes = np.unique(y)
     n_classes = len(classes)
 
-    means = tl.zeros((n_classes, *shape), X.dtype)
+    means = tl.zeros((n_classes, *shape))
     if tl.get_backend() == "cupy":
         X_centered = tl.zeros((n_classes, *X.shape))
         full_nan = cupy.full_like(X, cupy.nan)
@@ -81,16 +81,14 @@ def mode_scatter(
     elif shrinkage == "loocv":
         raise NotImplementedError
     # Shrink
-    structured = (tl.trace(scatter) / n_features) * tl.eye(
-        scatter.shape[0], dtype=X.dtype
-    )
+    structured = (tl.trace(scatter) / n_features) * tl.eye(scatter.shape[0])
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
     return scatter, shrinkage
 
 
 def force_toeplitz(A, taper=False):
     n, _ = A.shape
-    toep = tl.zeros(n, dtype=A.dtype)
+    toep = tl.zeros(n)
     for i in range(n):
         diag = tl.diag(A, k=i)
         toep[i] = tl.mean(diag)
@@ -231,3 +229,21 @@ def oas(X, emp_cov=None, assume_centered=False):
     shrinkage = num / den
 
     return shrinkage
+
+
+def pvl_perm(X, n, m):
+    Xs = np.zeros((n**2, m**2))
+    for i in range(n):
+        for j in range(n):
+            block_ij = X[i * m : (i + 1) * m, j * m : (j + 1) * m]
+            Xs[i * n + j, :] = block_ij.flatten()
+    return Xs
+
+
+def pvl_perm_inv(Xs, n, m):
+    X = np.zeros((n * m, n * m))
+    for i in range(n):
+        for j in range(n):
+            row_ij = Xs[i * n + j, :]
+            X[i * m : (i + 1) * m, j * m : (j + 1) * m] = row_ij.reshape((m, m))
+    return X

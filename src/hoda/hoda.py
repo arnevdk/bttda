@@ -1,24 +1,20 @@
 import math
+import pdb
 import warnings
 
-import ipdb
 import numpy as np
-import pandas as pd
 import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
 from numpy.linalg import LinAlgError
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.metrics import log_loss
 from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
                                      cross_validate)
 from sklearn.pipeline import FeatureUnion, Pipeline, make_pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
-from tensorly import random as tl_random
 from tqdm.notebook import tqdm
 
-from hoda.backend import fdtrc, lanczos, lobpcg
+from hoda.backend import copy, fdtrc, lanczos, lobpcg
 from hoda.classification import SelectFweAtLeastOne, Vectorize
 from hoda.cov import center, mode_scatter
 
@@ -109,7 +105,7 @@ def f_multiway(X, y, classes=None, class_counts=None, method="tr"):
     n_samples, *shape = X.shape
 
     if not tl.is_tensor(X):
-        X = tl.tensor(X, dtype=X.dtype)
+        X = tl.tensor(X)
     if classes is None or class_counts is None:
         classes, class_counts = np.unique(y, return_counts=True)
     # Calculate class means, overall class mean and center data
@@ -177,7 +173,7 @@ def trunc_eigh(
     rank=None,
     largest=True,
     method="lanczos",
-    **solver_params,
+    solver_params=None,
 ):
     """
 
@@ -202,13 +198,13 @@ def trunc_eigh(
         if B is None:
             v, w, _ = tl.tenalg.svd_interface(A, **solver_params)
         else:
-            v, w, _ = tl.tenalg.svd_interface(tl.solve(B @ A), **solver_params)
+            v, w, _ = tl.tenalg.svd_interface(tl.solve(B, A), **solver_params)
         if not largest:
             w = w[-rank:]
             v = v[:, -rank:]
 
     elif method == "lobpcg":
-        init = solver_params.pop("init", tl.eye(A.shape[0], dtype=A.dtype))
+        init = solver_params.pop("init", tl.eye(A.shape[0]))
         init = init[:, :rank]
         try:
             w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
@@ -263,7 +259,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def fit(self, X, y):
         # Setup
         if not tl.is_tensor(X):
-            X = tl.tensor(X, dtype=X.dtype)
+            X = tl.tensor(X)
 
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
@@ -279,29 +275,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         # Calculate means and center
         self.means_, X_centered = center(X, y, self.classes_)
-        means_centered = self.means_ - np.mean(self.means_, axis=0)
+        means_centered = self.means_ - tl.mean(self.means_, axis=0)
 
         # Initialize projections
-        modes = [k + 1 for k in range(order)]
-        if isinstance(self.rank, np.integer) or isinstance(self.rank, int):
-            rank = [self.rank] * order
-        elif self.rank is None:
-            rank = shape
-        else:
-            rank = self.rank
-        if self.init == "mlsvd":
-            (_, self.weights_), _ = tl.decomposition.partial_tucker(
-                X_centered,
-                rank=rank,
-                modes=modes,
-            )
-        else:
-            # TODO bug for random initialization
-            _, self.weights_ = tl.decomposition._tucker.initialize_tucker(
-                X_centered, rank, modes, self.random_state, init=self.init
-            )
-        for k in range(order):
-            self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
+        self._init(X_centered, self.rank, self.init)
 
         # Calculate total scatter
         scatter_x = [None] * order
@@ -324,7 +301,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         # Iteratively find projections
         if self.verbose:
-            print(f"Fitting discriminative Tucker model of rank {self.rank_}...")
+            print(f"Fitting discriminative tensor model of rank {self.rank_}...")
 
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
@@ -370,14 +347,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     scatter_b, scatter_w, self.weights_[k]
                 )
                 if self.solver == "lobpcg":
-                    solver_params["init"] = self.weights_[k].copy()
+                    solver_params["init"] = copy(self.weights_[k])
                 u, w = trunc_eigh(
                     A,
                     B=B,
                     rank=self.rank_[k],
                     method=self.solver,
                     largest=largest,
-                    **solver_params,
+                    solver_params=solver_params,
                 )
                 if self.solver == "lobpcg":
                     solver_params["init"] = u
@@ -386,7 +363,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     rank=self.rank_[k],
                     method=self.solver,
                     largest=largest,
-                    **solver_params,
+                    solver_params=solver_params,
                 )
 
                 # Calculate update and check convergence
@@ -398,10 +375,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 train_info_row = dict()
                 train_info_row["iteration"] = self.iter_
                 train_info_row["mode"] = k
-                train_info_row["update"] = update
-                train_info_row["shrinkage"] = shrinkage
+                train_info_row["update"] = float(update)
+                train_info_row["shrinkage"] = float(shrinkage)
                 obj = tl.sum(w)
-                train_info_row["objective"] = obj
+                train_info_row["objective"] = float(obj)
                 if self.extra_train_info:
                     train_info_row.update(self._extra_train_info(X, y, class_counts))
                 self.train_info_.append(train_info_row)
@@ -414,15 +391,51 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         Xt = self.transform(X)
         self._fit_forward(X, Xt, y)
 
-        # Convert train_info to dataframe
-        self.train_info_ = pd.DataFrame(self.train_info_).astype(float)
-
+        # Convert train_info to list dict
+        self.train_info_ = {
+            k: [dic[k] for dic in self.train_info_] for k in self.train_info_[0]
+        }
         return self
 
     @property
     def rank_(self):
         order = len(self.weights_)
         return tuple([self.weights_[k].shape[-1] for k in range(order)])
+
+    def _init(self, X_centered, rank, method):
+        _, *shape = X_centered.shape
+        order = X_centered.ndim - 1
+
+        # Determine multilinear rank
+        modes = [k + 1 for k in range(order)]
+        if isinstance(rank, np.integer) or isinstance(rank, int):
+            rank = [self.rank] * order
+        elif self.rank is None:
+            rank = shape
+        else:
+            rank = self.rank
+
+        if method == "mlsvd":
+            (_, self.weights_), _ = tl.decomposition.partial_tucker(
+                X_centered,
+                rank=rank,
+                modes=modes,
+            )
+        else:
+            self.weights_ = [None] * order
+            for k in range(order):
+                if method == "svd":
+                    X_centered_k = tl.unfold(X_centered, k + 1)
+                    self.weights_[k], _, _ = tl.tenalg.svd_interface(
+                        X_centered_k, method="truncated_svd", n_eigenvecs=rank[k]
+                    )
+                elif method == "random":
+                    self.weights_[k] = tl.random.base.random_tensor((shape[k], rank[k]))
+                    self.weights_[k], _ = tl.qr(self.weights_[k], mode="reduced")
+                else:
+                    raise NotImplementedError
+        for k in range(order):
+            self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
 
     def _fit_forward(self, X, Xt, y):
         n_samples, *shape = X.shape
@@ -435,6 +448,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.scale_x_ = tl.zeros(order)
         self.scale_g_ = tl.zeros(order)
         self.aps_ = [None] * order
+        # scale = 0
         for k in range(order):
             cov_x, shrink_x = mode_scatter(
                 X_centered,
@@ -444,65 +458,77 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 toeplitz=self.toeplitz,
                 taper=self.taper,
             )
+            cov_x /= n_samples * math.prod(shape) / shape[k] - 1
+
+            g = tl.tenalg.mode_dot(X_centered, self.weights_[k].T, k + 1)
             cov_g, shrink_g = mode_scatter(
-                Xt_centered,
+                g,
                 k,
-                # shrinkage=self.shrinkage,
+                shrinkage=self.shrinkage,
                 assume_centered=True,
             )
+            cov_g /= n_samples * math.prod(shape) / shape[k] - 1
 
-            scale_x = (tl.trace(cov_x) / shape[k]) / (
-                n_samples * math.prod(shape) / shape[k] - 1
-            )
-            scale_g = (tl.trace(cov_g) / self.rank_[k]) / (
-                n_samples * math.prod(self.rank_) / self.rank_[k] - 1
-            )
-
-            cov_x /= tl.trace(cov_x) / shape[k]
-            cov_g /= tl.trace(cov_g) / self.rank_[k]
-
-            self.cov_g_[k] = cov_g
-            self.cov_x_[k] = cov_x
-            self.scale_x_[k] = scale_x
-            self.scale_g_[k] = scale_g
+            # ut_cov_u = self.weights_[k].T @ cov_x @ self.weights_[k]
+            # self.aps_[k] = cov_x @ tl.solve(ut_cov_u, self.weights_[k].T).T
             self.aps_[k] = cov_x @ tl.solve(cov_g, self.weights_[k].T).T
-        self.scale_x_ = tl.mean(self.scale_x_)
-        self.scale_g_ = tl.mean(self.scale_g_)
+
+            # cov_x, shrink_x = mode_scatter(
+            #    X_centered,
+            #    k,
+            #    shrinkage=self.shrinkage,
+            #    assume_centered=True,
+            #    toeplitz=self.toeplitz,
+            #    taper=self.taper,
+            # )
+            # cov_g, shrink_g = mode_scatter(
+            #    Xt_centered,
+            #    k,
+            #    shrinkage=self.shrinkage,
+            #    assume_centered=True,
+            # )
+            # cov_x /= n_samples * math.prod(shape) / shape[k] - 1
+            # cov_g /= n_samples * math.prod(self.rank_) / self.rank_[k] - 1
+            # self.aps_[k] = cov_x @ tl.solve(cov_g, self.weights_[k].T).T
+            # norm = tl.norm(self.aps_[k])
+            # scale += tl.log(norm) / order
+            # self.aps_[k] /= norm
+        # self.aps_ = [self.aps_[k] * tl.exp(scale / order) for k in range(order)]
 
     def _extra_train_info(self, X, y, class_counts):
         info = dict()
-        n_samples = X.shape[0]
         Xt = self.transform(X)
         self._fit_forward(X, Xt, y)
 
         # Objective: multi-way F-score
         # trace-ratio
-        F_tr, _ = f_multiway(
+        F_tr = f_multiway(
             Xt,
             y,
             self.classes_,
             class_counts,
             method="tr",
         )
-        info["F_tr"] = F_tr
+        info["F_tr"] = float(F_tr)
         # ratio-trace
-        F_rt, _ = f_multiway(
+        F_rt = f_multiway(
             Xt,
             y,
             self.classes_,
             class_counts,
             method="rt",
         )
-        info["F_rt"] = F_rt
+        info["F_rt"] = float(F_rt)
 
         # MSE
         X_rec = self.inv_transform(Xt)
-        info["mse"] = tl.metrics.regression.MSE(X, X_rec)
+        mse = tl.metrics.regression.MSE(X, X_rec)
+        info["mse"] = float(mse)
         return info
 
     def transform(self, X, y=None):
         if not tl.is_tensor(X):
-            X = tl.tensor(X, dtype=X.dtype)
+            X = tl.tensor(X)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
             X, self.weights_, modes=range(1, order + 1), transpose=True
@@ -511,12 +537,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     def inv_transform(self, Xt, y=None):
         if not tl.is_tensor(Xt):
-            Xt = tl.tensor(Xt, dtype=Xt.dtype)
-        return (
-            tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=[1, 2])
-            * self.scale_x_
-            / self.scale_g_
-        )
+            Xt = tl.tensor(Xt)
+        order = Xt.ndim - 1
+        modes = [k + 1 for k in range(order)]
+        return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes)
 
     @property
     def n_params_(self):
@@ -543,7 +567,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.blocks_ = []
         self.train_info_ = []
 
-        err = X.copy()
+        err = copy(X)
         for b, rank in enumerate(self.ranks):
             hoda_params["rank"] = rank
             if blocks is not None and b < len(blocks):
@@ -562,11 +586,17 @@ class BTTDA(BaseEstimator, TransformerMixin):
             row["block"] = self.n_blocks_
             row["rank"] = block.rank_
             if self.extra_train_info:
-                row["mse"] = float(tl.mean((err) ** 2))
+                # row["mse"] = float(tl.mean((err) ** 2))
+                row["mse"] = float(
+                    tl.metrics.regression.MSE(X, self.inv_transform(self.transform(X)))
+                )
+                row["mse2"] = float(tl.mean(err**2))
             self.train_info_.append(row)
 
-        self.train_info_ = pd.DataFrame(self.train_info_)
-        self.train_info_.set_index(["block"], inplace=True)
+        # Convert train info to list dict
+        self.train_info_ = {
+            k: [dic[k] for dic in self.train_info_] for k in self.train_info_[0]
+        }
 
         return self
 
@@ -580,16 +610,17 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None, n_blocks=None):
         if not tl.is_tensor(X):
-            X = tl.tensor(X, dtype=X.dtype)
+            X = tl.tensor(X)
+        err = copy(X)
         n_samples, *_ = X.shape
         Xt = []
         if n_blocks is None:
             n_blocks = self.n_blocks_
         for b in range(n_blocks):
             block = self.blocks_[b]
-            Xtb = block.transform(X, y)
+            Xtb = block.transform(err, y)
             Xt.append(Xtb.reshape(n_samples, -1))
-            X -= block.inv_transform(Xtb)
+            err -= block.inv_transform(Xtb)
 
         Xt = tl.concatenate(Xt, axis=1)
         return Xt
@@ -633,16 +664,24 @@ class GreedyBTTDA(BTTDA):
         self.sub_verbose = verbose
         self.truncate = truncate
 
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, X_test=None, y_test=None, blocks=None):
         _, *shape = X.shape
         gs_params = self.gs_params or dict()
         gs_params.setdefault("scoring", "roc_auc")
         gs_params["refit"] = True
 
         self.blocks_ = []
+        val_scores = []
+        test_scores = []
         for b in range(self.max_blocks):
             if self.sub_verbose:
                 print(f"Fitting block {b+1}/{self.max_blocks}...")
+            if blocks is not None and len(blocks) <= b:
+                self.blocks_ = blocks[:b]
+                val_scores.append(np.nan)
+                test_scores.append(np.nan)
+                continue
+
             pipe = self._build_clf_pipe()
             param_grid = dict(
                 # bttda__ranks=(*self.ranks_,r) for r in range(1, min(shape) + 1)]
@@ -652,25 +691,29 @@ class GreedyBTTDA(BTTDA):
                         2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
                     )
                 ]
+                # bttda__ranks=[(*self.ranks_, r) for r in [2, 4, 8]]
             )
             gs = GridSearchCV(pipe, param_grid, **gs_params)
             gs.fit(X, y, bttda__blocks=self.blocks_)
             bttda = gs.best_estimator_["bttda"]
             self.blocks_ = bttda.blocks_
-            if not b:
-                self.train_info_ = bttda.train_info_
-            else:
-                score = self.train_info_["score"]
-                self.train_info_ = bttda.train_info_
-                self.train_info_["score"] = score
-            self.train_info_.loc[b + 1, "score"] = gs.best_score_
+            self.train_info_ = bttda.train_info_
+            val_scores.append(gs.best_score_)
+            if X_test is not None:
+                test_score = gs.scorer_(gs.best_estimator_, X_test, y_test)
+                test_scores.append(test_score)
+
+        self.train_info_["val_score"] = val_scores
+        if X_test is not None:
+            self.train_info_["test_score"] = test_scores
 
         if self.truncate:
-            n_blocks = self.train_info_["score"].idxmax()
+            n_blocks = np.argmax(self.train_info_["val_score"]) + 1
             self.blocks_ = self.blocks_[:n_blocks]
-            self.train_info_ = self.train_info_[:n_blocks]
+            self.train_info_ = {k: v[:n_blocks] for k, v in self.train_info_.items()}
             if self.sub_verbose:
                 print(f"Retaining {n_blocks} blocks")
+
         return self
 
     def _build_clf_pipe(self):
@@ -682,5 +725,6 @@ class GreedyBTTDA(BTTDA):
         return make_pipeline(
             BTTDA(**params),
             Vectorize(),
+            # SelectFweAtLeastOne(alpha=0.5),
             LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
         )
