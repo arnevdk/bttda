@@ -1,4 +1,5 @@
 # import numpy as np
+import math
 import warnings
 
 import numpy as np
@@ -11,39 +12,6 @@ try:
     import cupy
 except ImportError:
     pass
-
-
-def center(X, y, classes=None):
-    _, *shape = X.shape
-    order = len(shape)
-    if classes is None:
-        classes = np.unique(y)
-    n_classes = len(classes)
-
-    means = tl.zeros((n_classes, *shape))
-    if tl.get_backend() == "cupy":
-        X_centered = tl.zeros((n_classes, *X.shape))
-        full_nan = cupy.full_like(X, cupy.nan)
-        for ci, c in enumerate(classes):
-            where = y == c
-            where = cupy.array(where)
-            where = np.expand_dims(where, axis=tuple(np.arange(1, order + 1)))
-            X_where = cupy.where(
-                where,
-                X,
-                full_nan,
-            )
-            means[ci] = cupy.nanmean(X_where, axis=0)
-            X_centered[ci] = X_where - means[ci]
-        X_centered = cupy.nansum(X_centered, axis=0)
-    else:
-        X_centered = []
-        for ci, c in enumerate(classes):
-            X_where = X[y == c]
-            means[ci] = tl.mean(X_where, axis=0)
-            X_centered.append(X_where - means[ci])
-        X_centered = tl.concatenate(X_centered, axis=0)
-    return means, X_centered
 
 
 def mode_scatter(
@@ -247,3 +215,61 @@ def pvl_perm_inv(Xs, n, m):
             row_ij = Xs[i * n + j, :]
             X[i * m : (i + 1) * m, j * m : (j + 1) * m] = row_ij.reshape((m, m))
     return X
+
+
+class KroneckerCovariance(BaseEstimator):
+    def __init__(self, max_iter=1000, tol=1e-8, assume_centered=False, estimator="mle"):
+        self.max_iter = max_iter
+        self.tol = tol
+        self.assume_centered = assume_centered
+        self.estimator = estimator
+
+    def fit(self, X, Y=None, y=None):
+        if X is None:
+            X = Y
+        n_samples, *X_shape = X.shape
+        _, *Y_shape = Y.shape
+        order = len(X.shape[1:])
+
+        # Initialize
+        transforms = [None] * order
+        covs = [None] * order
+        for k in range(order):
+            transforms[k] = tl.zeros((X_shape[k], Y_shape[k]))
+            transforms[k][: Y_shape[k], :] = tl.eye(Y_shape[k])
+            covs[k] = transforms[k].copy()
+
+        # Find transformations
+        for self.iter_ in range(1, self.max_iter + 1):
+            update = 0
+            for k in range(order):
+                modes = range(1, order + 1)
+                X_proj = tl.tenalg.multi_mode_dot(
+                    X, transforms, modes, skip=k, transpose=True
+                )
+                modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                cov = tl.tensordot(X_proj, Y, axes=[modes, modes])
+                cov /= tl.mean(tl.diag(cov))
+                update += tl.norm(covs[k] - cov)
+                covs[k] = cov
+                if self.estimator == "mle":
+                    transforms[k] = cupy.linalg.pinv(cov).T
+                elif self.estimator == "map":
+                    transforms[k] = cov
+                else:
+                    raise NotImplementedError
+            if update < self.tol:
+                break
+
+        self.covs_ = [None] * order
+        # Find scaled covariance
+        for k in range(order):
+            modes = range(1, order + 1)
+            X_proj = tl.tenalg.multi_mode_dot(
+                X, transforms, modes, skip=k, transpose=True
+            )
+            modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+            self.covs_[k] = tl.tensordot(X_proj, Y, axes=[modes, modes])
+            self.covs_[k] /= n_samples * math.prod(X_shape) / X_shape[k] - 1
+
+        return self

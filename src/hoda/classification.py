@@ -1,7 +1,7 @@
 import numpy as np
 import tensorly as tl
-from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.feature_selection import SelectFwe
+from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
+from sklearn.feature_selection import f_classif
 from sklearn.preprocessing import FunctionTransformer
 
 try:
@@ -20,12 +20,19 @@ class Vectorize(FunctionTransformer):
         super().__init__(func=vec, **params)
 
 
-class SelectFweAtLeastOne(SelectFwe):
-    def _get_support_mask(self):
-        mask = super()._get_support_mask()
-        if not np.any(mask):
-            mask = self.pvalues_ == np.min(self.pvalues_)
-        return mask
+class SelectF(BaseEstimator, TransformerMixin):
+    def __init__(self, alpha=0.5):
+        self.alpha = alpha
+
+    def fit(self, X, y=None):
+        self.F_, self.p_ = f_classif(X, y)
+        self.mask_ = self.p_ < self.alpha
+        if not np.any(self.mask_):
+            self.mask_[np.argmax(self.F_)] = True
+        return self
+
+    def transform(self, X, y=None):
+        return X[:, self.mask_]
 
 
 class ToeplitzLDAWrapper(BaseEstimator, ClassifierMixin):

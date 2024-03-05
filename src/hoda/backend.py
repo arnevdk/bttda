@@ -142,6 +142,15 @@ def fdtrc(*args):
         raise NotImplementedError
 
 
+def chdtrc(*args):
+    if tl.get_backend() == "numpy":
+        return scipy.special.chdtrc(*args)
+    elif tl.get_backend() == "cupy":
+        return scipy.special.chdtrc(*args)
+    else:
+        raise NotImplementedError
+
+
 def copy(A):
     if tl.get_backend() == "pytorch":
         return A.detach().clone()
