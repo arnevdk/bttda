@@ -1,6 +1,5 @@
 import math
 import pdb
-import warnings
 
 import numpy as np
 import tensorly as tl
@@ -13,10 +12,11 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm.notebook import tqdm
 
-from hoda.backend import copy
+from hoda.backend import copy, lstsq
 from hoda.classification import SelectF, Vectorize
 from hoda.cov import KroneckerCovariance, mode_scatter
-from hoda.util import center, f_multiway, f_oneway, trunc_eigh
+from hoda.hopls import TOT
+from hoda.util import center, f_multiway, trunc_eigh
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -46,6 +46,7 @@ def obj_tr(scatter_b, scatter_w, u, psi=1):
     Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
     """
     phi = tl.trace(u.T @ scatter_b @ u) / tl.trace(u.T @ scatter_w @ u)
+    # _, phi = trunc_eigh(scatter_b, scatter_w, rank=1, largest=True)
     A = scatter_b - psi * phi * scatter_w
     return A, None, True
 
@@ -113,7 +114,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         verbose=False,
         solver_params=None,
         extra_train_info=False,
-        random_state=42,
+        random_state=None,
+        delta=None,
+        ortho=False,
+        fit_forward=False,
     ):
         self.max_iter = max_iter
         self.tol = tol
@@ -128,156 +132,35 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.extra_train_info = extra_train_info
         self.taper = taper
         self.random_state = random_state
+        self.delta = delta
+        self.ortho = ortho
+        self.fit_forward = fit_forward
 
     def fit(self, X, y):
-        # Setup
+        # Convert to tensor
         if not tl.is_tensor(X):
             X = tl.tensor(X)
 
-        self.classes_, class_counts = np.unique(y, return_counts=True)
-        class_counts = tl.tensor(class_counts)
-        n_samples, *shape = X.shape
-        order = len(shape)
-
-        # Initialize solver
-        if self.obj not in OBJECTIVES.keys():
-            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
-        solver_params = self.solver_params
-        if solver_params is None:
-            solver_params = dict()
-
-        # Calculate means and center
-        self.means_, X_centered = center(X, y, self.classes_)
-        means_centered = self.means_ - tl.mean(self.means_, axis=0)
-
-        # Initialize projections
-        self._init(X_centered, self.rank, self.init)
-
-        # Calculate total scatter
-        scatter_x = [None] * order
-        for k in range(order):
-            scatter_w, _ = mode_scatter(
-                X,
-                k,
-                assume_centered=True,
-                shrinkage=self.shrinkage,
-                toeplitz=self.toeplitz,
-                taper=self.taper,
-            )
-            scatter_b, _ = mode_scatter(
-                self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
-            )
-            scatter_x[k] = scatter_w + scatter_b
-
-        # Initialize iterative algorithm
-        self.scatter_w_ = [None] * order
-        self.scatter_b_ = [None] * order
-
-        # Initialze training information
+        # Initialize s
         self.train_info_ = []
 
-        # Iteratively find projections
-        if self.verbose:
-            print(f"Fitting discriminative tensor model of rank {self.rank_}...")
+        # Determine classses  and center
+        self.classes_, class_counts = np.unique(y, return_counts=True)
+        class_counts = tl.tensor(class_counts)
+        self.means_, X_centered = center(X, y, self.classes_)
 
-        iterator = range(1, self.max_iter + 1)
-        if self.verbose:
-            iterator = tqdm(iterator)
-        for self.iter_ in iterator:
-            converged = True
-            for k in range(order):
-                modes = range(1, order + 1)
-                X_centered_proj = tl.tenalg.multi_mode_dot(
-                    X_centered,
-                    self.weights_,
-                    modes=modes,
-                    skip=k,
-                    transpose=True,
-                )
+        # Initialize backward projections
+        self._init_backward(X_centered, self.rank, self.init)
+        # Fit backward model
+        self._fit_backward(X, X_centered, y, class_counts)
 
-                if isinstance(self.shrinkage, tuple):
-                    shrinkage = self.shrinkage[k]
-                else:
-                    shrinkage = self.shrinkage
-
-                scatter_w, shrinkage = mode_scatter(
-                    X_centered_proj,
-                    k,
-                    assume_centered=True,
-                    shrinkage=shrinkage,
-                    toeplitz=self.toeplitz,
-                    taper=self.taper,
-                )
-                self.scatter_w_[k] = scatter_w
-
-                # Calculate between class scatter
-                means_centered_proj = tl.tenalg.multi_mode_dot(
-                    means_centered, self.weights_, modes=modes, skip=k, transpose=True
-                )
-                scatter_b, _ = mode_scatter(
-                    means_centered_proj, k, weights=tl.sqrt(class_counts), shrinkage=0
-                )
-
-                self.scatter_b_[k] = scatter_b
-
-                # Solve
-                A, B, largest = OBJECTIVES[self.obj](
-                    scatter_b, scatter_w, self.weights_[k]
-                )
-                if self.solver == "lobpcg":
-                    solver_params["init"] = copy(self.weights_[k])
-                u, w = trunc_eigh(
-                    A,
-                    B=B,
-                    rank=self.rank_[k],
-                    method=self.solver,
-                    largest=largest,
-                    solver_params=solver_params,
-                )
-                if self.solver == "lobpcg":
-                    solver_params["init"] = u
-                u, w = trunc_eigh(
-                    u @ u.T @ (scatter_x[k]) @ u @ u.T,
-                    rank=self.rank_[k],
-                    method=self.solver,
-                    largest=largest,
-                    solver_params=solver_params,
-                )
-
-                # Calculate update and check convergence
-                update = tl.metrics.regression.MSE(u, self.weights_[k])
-                converged = update < self.tol and converged
-                self.weights_[k] = u
-
-                # Store mode training information
-                train_info_row = dict()
-                train_info_row["iteration"] = self.iter_
-                train_info_row["mode"] = k
-                train_info_row["update"] = float(update)
-                train_info_row["shrinkage"] = float(shrinkage)
-                obj = tl.sum(w)
-                train_info_row["objective"] = float(obj)
-                if self.extra_train_info:
-                    Xt = self.transform(X)
-                    train_info_row.update(
-                        extra_train_info(
-                            X,
-                            Xt,
-                            y,
-                            classes=self.classes_,
-                            class_counts=class_counts,
-                        )
-                    )
-                self.train_info_.append(train_info_row)
-
-                # Update weights
-            # Exit if converged
-            if converged:
-                break
-
-        # self._normalize(X_centered)
-        Xt = self.transform(X)
-        self._fit_forward(X, Xt, y)
+        # Initialize forward model
+        if self.fit_forward:
+            Xt = self.transform(X)
+            _, Xt_centered = center(Xt, y, self.classes_)
+            self._init_forward(X, Xt, X_centered, Xt_centered, y)
+            # Fit forward model
+            self._fit_forward(X, Xt, X_centered, Xt_centered, y)
 
         # Convert train_info to list dict
         self.train_info_ = {
@@ -290,7 +173,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         order = len(self.weights_)
         return tuple([self.weights_[k].shape[-1] for k in range(order)])
 
-    def _init(self, X_centered, rank, method):
+    def _init_backward(self, X_centered, rank, method):
         _, *shape = X_centered.shape
         order = X_centered.ndim - 1
 
@@ -318,79 +201,371 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                         X_centered_k, method="truncated_svd", n_eigenvecs=rank[k]
                     )
                 elif method == "random":
-                    self.weights_[k] = tl.random.base.random_tensor((shape[k], rank[k]))
+                    self.weights_[k] = tl.random.base.random_tensor(
+                        (shape[k], rank[k]), random_state=self.random_state
+                    )
                     self.weights_[k], _ = tl.qr(self.weights_[k], mode="reduced")
                 else:
                     raise NotImplementedError
         for k in range(order):
             self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
 
-    def _normalize(self, X_centered):
-        order = X_centered.ndim - 1
-        for k in range(order):
-            X_proj_k = tl.tenalg.mode_dot(X_centered, self.weights_[k].T, k + 1)
-            X_proj_k = tl.unfold(X_proj_k, k + 1)
-            scale = tl.norm(X_proj_k, axis=1)
-            self.weights_[k] /= scale
-
-    def _fit_forward(self, X, Xt, y):
+    def _fit_backward(self, X, X_centered, y, class_counts):
         n_samples, *shape = X.shape
         order = len(shape)
-        _, X_centered = center(X, y, self.classes_)
-        _, Xt_centered = center(Xt, y, self.classes_)
+
+        # Determine solver parameters
+        if self.obj not in OBJECTIVES.keys():
+            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
+        solver_params = self.solver_params
+        if solver_params is None:
+            solver_params = dict()
+
+        # Calculate means and center
+        means_centered = self.means_ - tl.mean(self.means_, axis=0)
+
+        # Calculate total scatter
+        if self.ortho:
+            scatter_x = [None] * order
+            for k in range(order):
+                scatter_w, _ = mode_scatter(
+                    X,
+                    k,
+                    assume_centered=True,
+                    shrinkage=self.shrinkage,
+                    toeplitz=self.toeplitz,
+                    taper=self.taper,
+                )
+                scatter_b, _ = mode_scatter(
+                    self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
+                )
+                scatter_x[k] = scatter_w + scatter_b
+
+        # Iteratively find projections
+        self.scatter_w_ = [None] * order
+        iterator = range(1, self.max_iter + 1)
+        if self.verbose:
+            iterator = tqdm(iterator)
+            iterator.set_description("Backward model")
+        for self.iter_ in iterator:
+            converged = True
+            for k in range(order):
+                modes = range(1, order + 1)
+                X_centered_proj = tl.tenalg.multi_mode_dot(
+                    X_centered,
+                    self.weights_,
+                    modes=modes,
+                    skip=k,
+                    transpose=True,
+                )
+
+                if isinstance(self.shrinkage, tuple):
+                    shrinkage = self.shrinkage[k]
+                else:
+                    shrinkage = self.shrinkage
+
+                scatter_w, shrinkage = mode_scatter(
+                    X_centered_proj,
+                    k,
+                    assume_centered=True,
+                    shrinkage=shrinkage,
+                    toeplitz=self.toeplitz,
+                    taper=self.taper,
+                )
+
+                # Calculate between class scatter
+                means_centered_proj = tl.tenalg.multi_mode_dot(
+                    means_centered, self.weights_, modes=modes, skip=k, transpose=True
+                )
+                scatter_b, _ = mode_scatter(
+                    means_centered_proj, k, weights=tl.sqrt(class_counts), shrinkage=0
+                )
+
+                # Solve
+                A, B, largest = OBJECTIVES[self.obj](
+                    scatter_b, scatter_w, self.weights_[k]
+                )
+                if self.solver == "lobpcg":
+                    solver_params["init"] = copy(self.weights_[k])
+                u, w = trunc_eigh(
+                    A,
+                    B=B,
+                    rank=self.rank_[k],
+                    method=self.solver,
+                    largest=largest,
+                    solver_params=solver_params,
+                )
+                if self.delta is not None:
+                    u = u[:, tl.cumsum(w) / tl.sum(w) > self.delta]
+                new_rank = u.shape[-1]
+                if self.ortho:
+                    if self.solver == "lobpcg":
+                        solver_params["init"] = u
+                    u, w = trunc_eigh(
+                        u @ u.T @ (scatter_x[k]) @ u @ u.T,
+                        # rank=self.rank_[k],
+                        rank=new_rank,
+                        method=self.solver,
+                        largest=largest,
+                        solver_params=solver_params,
+                    )
+
+                # Calculate update and check convergence
+                if u.shape[-1] != self.weights_[k].shape[-1]:
+                    update = np.inf
+                else:
+                    update = tl.metrics.regression.MSE(u, self.weights_[k])
+                converged = update < self.tol and converged
+
+                # Update weights
+                self.weights_[k] = u
+
+                # Store mode training information
+                train_info_row = dict(
+                    iteration=self.iter_,
+                    mode=k,
+                    update=float(update),
+                    shrinkage=float(shrinkage),
+                    rank=new_rank,
+                    objective=float(tl.sum(w)),
+                )
+                self.scatter_w_[k] = scatter_w
+                if self.extra_train_info:
+                    Xt = self.transform(X)
+                    train_info_row.update(
+                        extra_train_info(
+                            X,
+                            Xt,
+                            y,
+                            classes=self.classes_,
+                            class_counts=class_counts,
+                        )
+                    )
+                self.train_info_.append(train_info_row)
+
+            # Exit if converged
+            if converged:
+                break
+        pass
+
+    def _init_forward(self, X, Xt, X_centered, Xt_centered, y):
+        n_samples, *shape = X.shape
+        order = len(shape)
+
+        # cov_G = KroneckerCovariance(estimator="mle")
+        # cov_G.fit(Xt_centered, Xt_centered)
 
         self.aps_ = [None] * order
 
         for k in range(order):
-            cov_x, shrink_x = mode_scatter(
+            modes = range(1, order + 1)
+            X_centered_proj = tl.tenalg.multi_mode_dot(
                 X_centered,
-                k,
-                shrinkage=self.shrinkage,
-                assume_centered=True,
-                toeplitz=self.toeplitz,
-                taper=self.taper,
+                self.weights_,
+                modes=modes,
+                skip=k,
+                transpose=True,
             )
-            cov_x /= n_samples * math.prod(shape) / shape[k] - 1
+            cov_x, _ = mode_scatter(
+                X_centered_proj,
+                k,
+                assume_centered=True,
+                shrinkage=self.shrinkage,
+                # shrinkage=0,
+                # toeplitz=self.toeplitz,
+                # taper=self.taper,
+            )
+            cov_x /= n_samples * math.prod(self.rank_) / self.rank_[k] - 1
 
-            g = tl.tenalg.mode_dot(X_centered, self.weights_[k].T, k + 1)
             cov_g, shrink_g = mode_scatter(
-                g,
+                Xt_centered,
                 k,
-                shrinkage=self.shrinkage,
                 assume_centered=True,
+                shrinkage=0,
             )
-            cov_g /= n_samples * math.prod(shape) / shape[k] - 1
-            # Preconditioner
+            cov_g /= n_samples * math.prod(self.rank_) / self.rank_[k] - 1
+            # cov_g = cov_G.covs_[k]
+
             P_inv = tl.diag(1 / tl.diag(cov_g))
             self.aps_[k] = cov_x @ (
                 tl.solve(cov_g @ P_inv, self.weights_[k].T).T @ P_inv
             )
 
-            # cov_x, shrink_x = mode_scatter(
-            #    X_centered,
-            #    k,
-            #    assume_centered=True,
-            #    shrinkage=self.shrinkage,
-            #    toeplitz=self.toeplitz,
-            #    taper=self.taper,
-            # )
-            # cov_x /= n_samples * math.prod(shape) / shape[k] - 1
+    # def _fit_forward(self, X, Xt, X_centered, Xt_centered, y):
+    #    """
+    #    https://etna.math.kent.edu/vol.55.2022/pp92-111.dir/pp92-111.pdf
+    #    HOPLS
+    #    """
 
-            # cov_g, shrink_g = mode_scatter(
-            #    Xt_centered,
-            #    k,
-            #    assume_centered=True,
-            #    shrinkage=self.shrinkage,
-            # )
-            # cov_g /= n_samples * math.prod(self.rank_) / self.rank_[k] - 1
-            # if k:
-            #    cov_x /= tl.trace(cov_x) / shape[k]
-            #    cov_x *= tl.trace(cov_g) / self.rank_[k]
+    # def _fit_forward(self, X, Xt, X_centered, Xt_centered, y):
+    #    n_samples, *shape = X.shape
+    #    order = len(shape)
 
-            # P_inv = tl.diag(1 / tl.diag(cov_g))
-            # self.aps_[k] = cov_x @ (
-            #    tl.solve(cov_g @ P_inv, self.weights_[k].T).T @ P_inv
-            # )
+    #    self.cov_x_ = [None] * order
+    #    self.cov_g_ = [None] * order
+    #    self.scale_x_ = tl.zeros(order)
+    #    self.scale_g_ = tl.zeros(order)
+    #    self.aps_ = [None] * order
+    #    for k in range(order):
+    #        cov_x, shrink_x = mode_scatter(
+    #            X_centered,
+    #            k,
+    #            assume_centered=True,
+    #            # shrinkage=self.shrinkage,
+    #            # toeplitz=self.toeplitz,
+    #            # taper=self.taper,
+    #        )
+    #        cov_g, shrink_g = mode_scatter(
+    #            Xt_centered,
+    #            k,
+    #            # shrinkage=self.shrinkage,
+    #            assume_centered=True,
+    #        )
+
+    #        scale_x = (tl.trace(cov_x) / shape[k]) / (
+    #            n_samples * math.prod(shape) / shape[k] - 1
+    #        )
+    #        scale_g = (tl.trace(cov_g) / self.rank_[k]) / (
+    #            n_samples * math.prod(self.rank_) / self.rank_[k] - 1
+    #        )
+
+    #        cov_x /= tl.trace(cov_x) / shape[k]
+    #        cov_g /= tl.trace(cov_g) / self.rank_[k]
+
+    #        self.cov_g_[k] = cov_g
+    #        self.cov_x_[k] = cov_x
+    #        self.scale_x_[k] = scale_x
+    #        self.scale_g_[k] = scale_g
+    #        # self.aps_[k] = cov_x @ tl.solve(cov_g, self.weights_[k].T).T
+    #        P_inv = tl.diag(1 / tl.diag(cov_g))
+    #        self.aps_[k] = cov_x @ (
+    #            tl.solve(cov_g @ P_inv, self.weights_[k].T).T @ P_inv
+    #        )
+
+    #    self.scale_x_ = tl.mean(self.scale_x_)
+    #    self.scale_g_ = tl.mean(self.scale_g_)
+
+    # def _fit_forward(self, X, Xt, X_centered, Xt_centered, y):
+    #    n_samples, *shape = X.shape
+    #    order = len(shape)
+    #    x_proj_part = [None] * order
+    #    for k in range(order):
+    #        modes = range(1, order + 1)
+    #        x_proj_part[k] = tl.tenalg.multi_mode_dot(
+    #            X_centered, self.weights_, modes=modes, skip=k, transpose=True
+    #        )
+
+    #    iterator = range(1, self.max_iter + 1)
+    #    if self.verbose:
+    #        iterator = tqdm(iterator)
+    #        iterator.set_description("Forward model ")
+    #    converged = False
+    #    for self.iter_ in iterator:
+    #        if self.extra_train_info:
+    #            X_approx = self.inv_transform(Xt)
+    #            err = X - X_approx
+
+    #            n_samples = X.shape[0]
+    #            G_flat = tl.to_numpy(
+    #                Xt.reshape((n_samples, -1), order="F"),
+    #            )
+    #            err_flat = tl.to_numpy(err.reshape((n_samples, -1), order="F"))
+    #            cross_corr = np.corrcoef(G_flat, err_flat, rowvar=False)
+    #            cross_corr = cross_corr[G_flat.shape[-1] :, : G_flat.shape[-1]].T
+    #            print(
+    #                f"MSE: {tl.metrics.regression.MSE(X, X_approx)} corr: {tl.metrics.regression.MSE(cross_corr, 0)}"
+    #            )
+
+    #        if converged:
+    #            break
+
+    #        converged = True
+
+    #        for k in range(order):
+    #            modes = range(1, order + 1)
+    #            x = tl.tenalg.multi_mode_dot(
+    #                x_proj_part[k], self.aps_, modes=modes, skip=k
+    #            )
+    #            cov_x, _ = mode_scatter(
+    #                x,
+    #                k,
+    #                assume_centered=True,
+    #                # shrinkage=self.shrinkage,
+    #                # toeplitz=self.toeplitz,
+    #                # taper=self.taper,
+    #                shrinkage=0,
+    #            )
+    #            cov_x /= n_samples * math.prod(shape) / shape[k] - 1
+
+    #            g = tl.tenalg.multi_mode_dot(
+    #                Xt_centered, self.aps_, modes=modes, skip=k
+    #            )
+    #            cov_g, shrink_g = mode_scatter(
+    #                g,
+    #                k,
+    #                assume_centered=True,
+    #                # shrinkage=self.shrinkage,
+    #                shrinkage=0,
+    #            )
+    #            cov_g /= n_samples * math.prod(shape) / shape[k] - 1
+    #            P_inv = tl.diag(1 / tl.diag(cov_g))
+    #            ap = cov_x @ (tl.solve(cov_g @ P_inv, self.weights_[k].T).T @ P_inv)
+
+    #            # ap = cov_x @ (tl.solve(cov_g, self.weights_[k].T).T)
+    #            update = tl.metrics.regression.MSE(
+    #                ap / tl.norm(self.aps_[k]), self.aps_[k] / tl.norm(self.aps_[k])
+    #            )
+    #            self.aps_[k] = ap
+
+    #        converged = update < self.tol and converged
+
+    def _fit_forward(self, X, Xt, X_centered, Xt_centered, y):
+        # TODO: add regularization
+        # TODO: add weighted
+        n_samples, *shape = X.shape
+        order = len(shape)
+
+        iterator = range(1, self.max_iter + 1)
+        if self.verbose:
+            iterator = tqdm(iterator)
+            iterator.set_description("Forward model ")
+        converged = False
+        for self.iter_ in iterator:
+            if self.extra_train_info:
+                X_approx = self.inv_transform(Xt)
+                err = X - X_approx
+
+                n_samples = X.shape[0]
+                G_flat = tl.to_numpy(
+                    Xt.reshape((n_samples, -1), order="F"),
+                )
+                err_flat = tl.to_numpy(err.reshape((n_samples, -1), order="F"))
+                cross_corr = np.corrcoef(G_flat, err_flat, rowvar=False)
+                cross_corr = cross_corr[G_flat.shape[-1] :, : G_flat.shape[-1]].T
+                print(
+                    f"MSE: {tl.metrics.regression.MSE(X, X_approx)} corr: {tl.metrics.regression.MSE(cross_corr, 0)}"
+                )
+
+            if converged:
+                break
+
+            converged = True
+
+            for k in range(order):
+                modes = range(1, order + 1)
+                gk = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
+                gk = tl.unfold(gk, k + 1)
+                xk = tl.unfold(X, k + 1)
+
+                ap, *_ = lstsq(gk.T, xk.T)
+                ap = ap.T
+
+                update = tl.metrics.regression.MSE(
+                    ap / tl.norm(self.aps_[k]), self.aps_[k] / tl.norm(self.aps_[k])
+                )
+                self.aps_[k] = ap
+
+            converged = update < self.tol and converged
 
     def transform(self, X, y=None):
         if not tl.is_tensor(X):
@@ -407,6 +582,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         order = Xt.ndim - 1
         modes = [k + 1 for k in range(order)]
         return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes)
+        # return tl.tenalg.tensordot(Xt, self.A_, modes=[(1, 2), (2, 3)])
+
+    # def inv_transform(self, Xt, y=None):
+    #    if not tl.is_tensor(Xt):
+    #        Xt = tl.tensor(Xt, dtype=Xt.dtype)
+    #    return (
+    #        tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=[1, 2])
+    #        * self.scale_x_
+    #        / self.scale_g_
+    #    )
 
     @property
     def n_params_(self):
@@ -434,6 +619,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         class_counts = tl.tensor(class_counts)
 
         hoda_params = self.hoda_params or dict()
+        hoda_params["fit_forward"] = True
         self.blocks_ = []
         self.train_info_ = []
 
@@ -524,72 +710,75 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return tuple([b.rank_ for b in self.blocks_])
 
 
-class InfoBTTDA(BTTDA):
-    def __init__(
-        self,
-        hoda_params=None,
-        extra_train_info=False,
-        verbose=False,
-        max_blocks=8,
-        info_crit="bic",
-    ):
-        super().__init__(
-            hoda_params=hoda_params, extra_train_info=extra_train_info, verbose=False
-        )
-        self.max_blocks = max_blocks
-        self.sub_verbose = verbose
-        self.info_crit = info_crit
-
-    def fit(self, X, y=None, X_test=None, y_test=None, blocks=None):
-        n_samples, *shape = X.shape
-
-        self.blocks_ = []
-        info_crits = []
-        bttda_params = {
-            k: v
-            for k, v in self.get_params().items()
-            if k in BTTDA().get_params().keys()
-        }
-        for b in range(self.max_blocks):
-            if self.sub_verbose:
-                print(f"Fitting block {b+1}/{self.max_blocks}...")
-            # ranks = list(2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int))
-            ranks = [1]
-            # ranks.append(max(shape))
-            # ranks = list(range(1, min(shape) + 1))
-            best_bttda = None
-            best_info_crit = np.inf
-            for r in ranks:
-                bttda = BTTDA(**bttda_params)
-                params = dict(ranks=(*self.ranks_, r))
-                bttda.set_params(**params)
-                bttda.fit(X, y, blocks=self.blocks_)
-                Xt = bttda.transform(X)
-                F = f_multiway(Xt, y, method=bttda.blocks_[0].obj)
-                log_like = tl.log(F) * n_samples
-                n = n_samples
-                # k = bttda.n_params_
-                k = math.prod(Xt.shape[1:])
-                if self.info_crit == "bic":
-                    info_crit = k * tl.log(n) - 2 * log_like
-                else:
-                    aic = 2 * k - 2 * log_like
-                    if self.info_crit == "aic":
-                        info_crit = aic
-                    elif self.info_crit == "aicc":
-                        info_crit = aic + (2 * k**2 + 2 * k) / (n - k - 1)
-                    else:
-                        raise ValueError
-                info_crit = float(info_crit)
-                if info_crit < best_info_crit:
-                    best_info_crit = info_crit
-                    best_bttda = bttda
-            self.blocks_ = best_bttda.blocks_
-            self.train_info_ = best_bttda.train_info_
-            info_crits.append(best_info_crit)
-            self.train_info_[self.info_crit] = info_crits
-
-        return self
+# class InfoBTTDA(BTTDA):
+#    def __init__(
+#        self,
+#        hoda_params=None,
+#        extra_train_info=False,
+#        verbose=False,
+#        max_blocks=8,
+#        info_crit="bic",
+#    ):
+#        super().__init__(
+#            hoda_params=hoda_params, extra_train_info=extra_train_info, verbose=False
+#        )
+#        self.max_blocks = max_blocks
+#        self.sub_verbose = verbose
+#        self.info_crit = info_crit
+#
+#    def fit(self, X, y=None, X_test=None, y_test=None, blocks=None):
+#        n_samples, *shape = X.shape
+#
+#        self.blocks_ = []
+#        info_crits = []
+#        bttda_params = {
+#            k: v
+#            for k, v in self.get_params().items()
+#            if k in BTTDA().get_params().keys()
+#        }
+#        for b in range(self.max_blocks):
+#            if self.sub_verbose:
+#                print(f"Fitting block {b+1}/{self.max_blocks}...")
+#            ranks = list(2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int))
+#            # ranks = [2]
+#            # ranks.append(max(shape))
+#            # ranks = list(range(1, min(shape) + 1))
+#            best_bttda = None
+#            best_info_crit = np.inf
+#            for r in ranks:
+#                bttda = BTTDA(**bttda_params)
+#                params = dict(ranks=(*self.ranks_, r))
+#                bttda.set_params(**params)
+#                bttda.fit(X, y, blocks=self.blocks_)
+#                Xt = bttda.transform(X)
+#                # F = f_multiway(Xt, y, method=bttda.blocks_[0].obj)
+#                F = f_multiway(Xt, y, method="rt")
+#                log_like = tl.log(F) * n_samples
+#                # lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
+#                # lda = lda.fit(scipy.stats.zscore(vec(Xt)), y) log_like = -log_loss(y, lda.predict_proba(vec(Xt)), normalize=False)
+#                n = n_samples
+#                # k = bttda.n_params_
+#                k = math.prod(Xt.shape[1:])
+#                if self.info_crit == "bic":
+#                    info_crit = k * tl.log(n) - 2 * log_like
+#                else:
+#                    aic = 2 * k - 2 * log_like
+#                    if self.info_crit == "aic":
+#                        info_crit = aic
+#                    elif self.info_crit == "aicc":
+#                        info_crit = aic + (2 * k**2 + 2 * k) / (n - k - 1)
+#                    else:
+#                        raise ValueError
+#                info_crit = float(info_crit)
+#                if info_crit < best_info_crit:
+#                    best_info_crit = info_crit
+#                    best_bttda = bttda
+#            self.blocks_ = best_bttda.blocks_
+#            self.train_info_ = best_bttda.train_info_
+#            info_crits.append(best_info_crit)
+#            self.train_info_[self.info_crit] = info_crits
+#
+#        return self
 
 
 class GreedyBTTDA(BTTDA):
@@ -600,6 +789,7 @@ class GreedyBTTDA(BTTDA):
         verbose=False,
         max_blocks=8,
         gs_params=None,
+        truncate=True,
     ):
         super().__init__(
             hoda_params=hoda_params, extra_train_info=extra_train_info, verbose=False
@@ -607,6 +797,7 @@ class GreedyBTTDA(BTTDA):
         self.max_blocks = max_blocks
         self.gs_params = gs_params
         self.sub_verbose = verbose
+        self.truncate = truncate
 
     def fit(self, X, y=None, X_test=None, y_test=None, blocks=None):
         _, *shape = X.shape
@@ -628,12 +819,14 @@ class GreedyBTTDA(BTTDA):
 
             pipe = self._build_clf_pipe()
             # ranks = list(2 ** np.arange(np.floor(np.log2(max(shape))) + 1, dtype=int))
-            ranks = list(2 ** np.arange(np.floor(np.log2(min(shape))) + 1, dtype=int))
-            # ranks = [4]
             # ranks = list(range(1, min(shape) + 1))
+            # ranks = [1, 2, 3, 4]
+            ranks = list(2 ** np.arange(np.floor(np.log2(min(shape))) + 1, dtype=int))
             param_grid = dict(bttda__ranks=[(*self.ranks_, r) for r in ranks])
             gs = GridSearchCV(pipe, param_grid, **gs_params)
             gs.fit(X, y, bttda__blocks=self.blocks_)
+            if self.truncate and b and gs.best_score_ < val_scores[-1]:
+                break
             bttda = gs.best_estimator_["bttda"]
             self.blocks_ = bttda.blocks_
             self.train_info_ = bttda.train_info_
@@ -657,15 +850,15 @@ class GreedyBTTDA(BTTDA):
         return make_pipeline(
             BTTDA(**params),
             Vectorize(),
-            StandardScaler(with_mean=True, with_std=True),
-            SelectF(alpha=0.95),
-            LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
+            StandardScaler(),
+            SelectF(alpha=0.5),
+            LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
         )
 
 
 def extra_train_info(X, Xt, y, X_rec=None, classes=None, class_counts=None):
     if classes is None or class_counts is None:
-        classes, class_counts = np.unique(y, return_counts=True)
+        classes, class_counts = np.unique(y, re0turn_counts=True)
     info = dict()
     # Objective: multi-way F-score
     # trace-ratio

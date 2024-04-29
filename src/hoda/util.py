@@ -74,6 +74,10 @@ def trunc_eigh(
     v *= sign
     # Normalize
     v = v / tl.norm(v)
+    # sort
+    idc = np.argsort(w)
+    w = w[idc]
+    v = v[:, idc]
     return v, w
 
 

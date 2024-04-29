@@ -20,6 +20,11 @@ class Vectorize(FunctionTransformer):
         super().__init__(func=vec, **params)
 
 
+class Tensor(FunctionTransformer):
+    def __init__(self, **params):
+        super().__init__(func=tl.tensor, **params)
+
+
 class SelectF(BaseEstimator, TransformerMixin):
     def __init__(self, alpha=0.5):
         self.alpha = alpha

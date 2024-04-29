@@ -15,6 +15,7 @@ setup(
     ],
     extras_require={
         "experiments": [
+            "mne<=1.6.1",
             "moabb==1.0.0",
             "dask",
             "jupyter",

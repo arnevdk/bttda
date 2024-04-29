@@ -1,7 +1,9 @@
+import numpy as np
 from sklearn.utils import safe_mask, safe_sqr
 
 try:
     import cupy
+    import cupy.linalg
     import cupyx.scipy
     import cupyx.scipy.linalg
     import cupyx.scipy.sparse.linalg
@@ -18,6 +20,13 @@ except ImportError:
 import scipy.linalg
 import scipy.special
 import tensorly as tl
+
+
+def pinv(*args, **kwargs):
+    if tl.get_backend() == "cupy":
+        return cupy.linalg.pinv(*args, **kwargs)
+    else:
+        raise NotImplementedError
 
 
 def lanczos(*args, **kwargs):
@@ -156,3 +165,21 @@ def copy(A):
         return A.detach().clone()
     else:
         return A.copy()
+
+
+def less(a, b):
+    if tl.get_backend() == "numpy":
+        return np.less(a, b)
+    elif tl.get_backend() == "cupy":
+        return cupy.less(a, b)
+    else:
+        raise NotImplementedError
+
+
+def lstsq(a, b, **kwargs):
+    if tl.get_backend() == "numpy":
+        return np.linalg.lstsq(a, b, **kwargs)
+    elif tl.get_backend() == "cupy":
+        return cupy.linalg.lstsq(a, b, **kwargs)
+    else:
+        raise NotImplementedError

@@ -1,5 +1,6 @@
 #!/usr/bin/bash
-podman run --security-opt=label=disable \
+podman run --rm \
+	   --security-opt=label=disable \
            --device=nvidia.com/gpu=all \
            -v ./src:/project/src:Z \
            -v ./tests:/project/tests:Z \
@@ -8,4 +9,4 @@ podman run --security-opt=label=disable \
            -v $HOME/.jupyter:/root/.jupyter:Z \
            -v $HOME/.ipython:/root/.ipython:Z \
 	   -p 8888:8888 \
-           -it hoda-$1 $2
+           -it hoda-bci:$1 $2

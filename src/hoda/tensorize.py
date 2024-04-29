@@ -26,11 +26,12 @@ def hankel_tensor_inv(Xh, y=None):
 
 def stf_tensor(
     X,
-    sfreq,
-    tmin,
+    sfreq=None,
+    tmin=0,
     y=None,
     morlet_params=None,
     baseline_params=None,
+    decim=1,
 ):
     # TFR
     if morlet_params is None:
@@ -41,21 +42,25 @@ def stf_tensor(
     Xt = tfr_array_morlet(X, sfreq, **morlet_params)
 
     # Baseline
-    if baseline_params is None:
-        baseline_params = dict()
-    baseline_params.setdefault("baseline", (-0.15, -0.05))
-    baseline_params.setdefault("mode", "logratio")
-    n_times = X.shape[-1]
-    tmax = n_times / sfreq + tmin
-    times = np.linspace(tmin, tmax, n_times)
-    Xt = rescale(Xt, times, **baseline_params)
+    if baseline_params is not None:
+        baseline_params.setdefault("baseline", (-0.15, -0.05))
+        baseline_params.setdefault("mode", "logratio")
+        n_times = X.shape[-1]
+        tmax = n_times / sfreq + tmin
+        times = np.linspace(tmin, tmax, n_times)
+        Xt = rescale(Xt, times, **baseline_params)
+    # Decimate
+    Xt = Xt[:, :, :, ::decim]
     return Xt
 
 
-def crop(X, begin, end, sfreq, tmin):
+def crop(X, begin=0, end=None, sfreq=None, tmin=None):
     begin = int((begin - tmin) * sfreq)
-    end = int((end - tmin) * sfreq)
-    return X[..., begin:end]
+    if end is None:
+        return X[..., begin:]
+    else:
+        end = int((end - tmin) * sfreq)
+        return X[..., begin:end]
 
 
 class HankelTensor(FunctionTransformer):
@@ -64,8 +69,9 @@ class HankelTensor(FunctionTransformer):
         super().__init__(**params)
 
 
-class STFTensor(TransformerMixin):
-    def __init__(**params):
-        params["func"] = stf_tensor
-        super().__init__(**params)
-        raise NotImplementedError
+def STFTensor(**params):
+    return FunctionTransformer(stf_tensor, kw_args=params)
+
+
+def Crop(**params):
+    return FunctionTransformer(crop, kw_args=params)
