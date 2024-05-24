@@ -1,9 +1,15 @@
 import numpy as np
 import scipy.linalg
+import tensorly as tl
 from mne.baseline import rescale
 from mne.time_frequency import tfr_array_morlet
 from sklearn.base import TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
+
+
+def vec(X, y=None, extra=None):
+    x = X.reshape((X.shape[0], -1))
+    return tl.to_numpy(x)
 
 
 def hankel_tensor(X, y=None):
@@ -63,14 +69,30 @@ def crop(X, begin=0, end=None, sfreq=None, tmin=None):
         return X[..., begin:end]
 
 
-class HankelTensor(FunctionTransformer):
-    def __init__(**params):
-        params["func"] = hankel_tensor
-        super().__init__(**params)
+class Vectorize(FunctionTransformer):
+    def __init__(self, **params):
+        super().__init__(func=vec, **params)
 
 
-def STFTensor(**params):
-    return FunctionTransformer(stf_tensor, kw_args=params)
+class Tensorize(TransformerMixin):
+    def __init__(self, method=None, params=None):
+        self.method = method
+        self.params = params
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        params = self.params
+        if params is None:
+            params = dict()
+        if self.method == "stf":
+            X = stf_tensor(X, **params)
+        elif self.method == "hankel":
+            X = hankel_tensor(X, **params)
+        if not tl.is_tensor(X):
+            X = tl.tensor()
+        return X
 
 
 def Crop(**params):

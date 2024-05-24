@@ -4,7 +4,7 @@ import numpy as np
 import tensorly as tl
 from numpy.linalg import LinAlgError
 
-from hoda.backend import fdtrc, lanczos, lobpcg
+from hoda.backend import fdtrc, lanczos, lobpcg, pinv
 from hoda.cov import mode_scatter
 
 try:
@@ -289,3 +289,9 @@ def combine_pvalues(pvalues, axis=None, method="fisher", weights=None):
             f"Invalid method {method!r}. Valid methods are 'fisher', "
             "'pearson', 'mudholkar_george', 'tippett', and 'stouffer'"
         )
+
+
+def lstsq_ridge(X, y, lambda_=1):
+    A = lambda_ * tl.eye(X.shape[1])
+    pseudo_inverse = pinv(X.T @ X + A) @ X.T
+    return pseudo_inverse @ y

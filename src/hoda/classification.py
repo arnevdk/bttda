@@ -4,25 +4,12 @@ from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.feature_selection import f_classif
 from sklearn.preprocessing import FunctionTransformer
 
+from hoda.tensorize import vec
+
 try:
     from toeplitzlda.classification import ToeplitzLDA
 except ImportError:
     pass
-
-
-def vec(X, y=None, extra=None):
-    x = X.reshape((X.shape[0], -1))
-    return tl.to_numpy(x)
-
-
-class Vectorize(FunctionTransformer):
-    def __init__(self, **params):
-        super().__init__(func=vec, **params)
-
-
-class Tensor(FunctionTransformer):
-    def __init__(self, **params):
-        super().__init__(func=tl.tensor, **params)
 
 
 class SelectF(BaseEstimator, TransformerMixin):
