@@ -33,8 +33,8 @@ def trunc_eigh(
     if method == "lanczos":
         try:
             v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
-            if np.any(np.isnan(v)):
-                raise LinAlgError
+            # if np.any(np.isnan(v)):
+            #    raise LinAlgError
         except LinAlgError as e:
             warnings.warn(f"lanczos failed with error {e}")
             v, w = lanczos(
@@ -69,15 +69,10 @@ def trunc_eigh(
             )
     else:
         raise ValueError("Solver must be one of ['lanczos', 'lobpcg', 'svd']")
-    # Flip sign
-    sign = tl.sign(v[0, :])
-    v *= sign
-    # Normalize
-    v = v / tl.norm(v)
     # sort
-    idc = np.argsort(w)
-    w = w[idc]
-    v = v[:, idc]
+    # idc = np.argsort(w)
+    # w = w[idc]
+    # v = v[:, idc]
     return v, w
 
 

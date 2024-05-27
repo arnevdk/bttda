@@ -27,7 +27,7 @@ def mode_scatter(
     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
     if not assume_centered:
         X = X - tl.mean(X, axis=0)
-    scatter = tl.tensordot(X, X.conj(), axes=(modes, modes))
+    scatter = tl.tensordot(X, X, axes=(modes, modes))
     # Force Toeplitz
     if toeplitz is not None and k in toeplitz:
         scatter = force_toeplitz(scatter, taper=taper)

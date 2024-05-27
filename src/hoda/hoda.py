@@ -118,7 +118,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         extra_train_info=False,
         random_state=None,
         delta=None,
-        ortho=False,
         forward=False,
     ):
         self.max_iter = max_iter
@@ -135,18 +134,31 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.taper = taper
         self.random_state = random_state
         self.delta = delta
-        self.ortho = ortho
         self.forward = forward
 
     def fit(self, X, y, classes=None, class_counts=None):
         # Convert to tensor
         if not tl.is_tensor(X):
             X = tl.tensor(X)
+        # Calculate means, centering and classes once (slow on GPU)
+        if classes is None or class_counts is None:
+            self.classes_, class_counts = np.unique(y, return_counts=True)
+            class_counts = tl.tensor(class_counts)
+        else:
+            self.classes_ = classes
+        self.means_, X_centered = center(X, y, self.classes_)
         # Fit backward model
-        self.fit_backward(X, y, classes=None, class_counts=class_counts)
+        self.fit_backward(
+            X,
+            y,
+            X_centered=X_centered,
+            means=self.means_,
+            classes=self.classes_,
+            class_counts=class_counts,
+        )
         # Fit forward model
         if self.forward:
-            self.fit_forward(X, y)
+            self.fit_forward(X, y, X_centered=X_centered)
         return self
 
     def fit_backward(
@@ -188,27 +200,26 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         means_centered = self.means_ - tl.mean(self.means_, axis=0)
 
         # Calculate total scatter
-        if self.ortho:
-            scatter_x = [None] * order
-            for k in range(order):
-                scatter_w, _ = mode_scatter(
-                    X,
-                    k,
-                    assume_centered=True,
-                    shrinkage=self.shrinkage,
-                    toeplitz=self.toeplitz,
-                    taper=self.taper,
-                )
-                scatter_b, _ = mode_scatter(
-                    self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
-                )
-                scatter_x[k] = scatter_w + scatter_b
+        scatter_t = [None] * order
+        for k in range(order):
+            scatter_w, _ = mode_scatter(
+                X_centered,
+                k,
+                assume_centered=True,
+                shrinkage=self.shrinkage,
+                toeplitz=self.toeplitz,
+                taper=self.taper,
+            )
+            scatter_b, _ = mode_scatter(
+                self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
+            )
+            scatter_t[k] = scatter_w + scatter_b
 
         # Iteratively find projections
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
             iterator = tqdm(iterator)
-            iterator.set_description("Backward model")
+            iterator.set_description(f"Backward model rank={self.rank_}")
         for self.iter_ in iterator:
             converged = True
             for k in range(order):
@@ -240,7 +251,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     means_centered, self.weights_, modes=modes, skip=k, transpose=True
                 )
                 scatter_b, _ = mode_scatter(
-                    means_centered_proj, k, weights=tl.sqrt(class_counts), shrinkage=0
+                    means_centered_proj,
+                    k,
+                    weights=tl.sqrt(class_counts),
+                    shrinkage=0,
+                    assume_centered=True,
                 )
 
                 # Solve
@@ -258,38 +273,34 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     solver_params=solver_params,
                 )
                 if self.delta is not None:
+                    idc = np.argsort(w)
+                    w = w[idc]
+                    u = u[:, idc]
                     u = u[:, tl.cumsum(w) / tl.sum(w) > self.delta]
                 new_rank = u.shape[-1]
-                if self.ortho:
-                    if self.solver == "lobpcg":
-                        solver_params["init"] = u
-                    u, w = trunc_eigh(
-                        u @ u.T @ (scatter_x[k]) @ u @ u.T,
-                        # rank=self.rank_[k],
-                        rank=new_rank,
-                        method=self.solver,
-                        largest=largest,
-                        solver_params=solver_params,
-                    )
-
-                # A = tl.random.base.random_tensor(
-                #    (shape[k], shape[k]), random_state=self.random_state
-                # )
-                # A, _ = tl.qr(A, mode="reduced")
-                # Xk = tl.unfold(X_centered_proj, k + 1)
-                # for j in range(100):
-                #    en = ElasticNet()
-                #    a = u.T @ Xk
-                #    b = A @ Xk
-                #    en.fit(tl.to_numpy(a.T), tl.to_numpy(b.T))
-                #    u_new = tl.to_numpy(en.coef_)
-                #    d,_,
+                # Re-orthogonalize
+                if self.solver == "lobpcg":
+                    solver_params["init"] = u
+                u, w = trunc_eigh(
+                    u @ u.T @ (scatter_t[k]) @ u @ u.T,
+                    # rank=self.rank_[k],
+                    rank=new_rank,
+                    method=self.solver,
+                    largest=largest,
+                    solver_params=solver_params,
+                )
+                # Flip sign
+                sign = tl.sign(u[0, :])
+                u *= sign
+                # Normalize
+                u = u / tl.norm(u, axis=0)
 
                 # Calculate update and check convergence
                 if u.shape[-1] != self.weights_[k].shape[-1]:
                     update = np.inf
                 else:
                     update = tl.metrics.regression.MSE(u, self.weights_[k])
+
                 converged = update < self.tol and converged
 
                 # Update weights
@@ -324,7 +335,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             for k in self.train_info_["backward"][0]
         }
 
-    def fit_forward(self, X, y, Xt=None):
+    def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
         # TODO: add regularization
         # Convert to tensor
         if not tl.is_tensor(X):
@@ -333,11 +344,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         order = len(shape)
 
         # Project
+
         if Xt is None:
             Xt = self.transform(X)
-
-        _, Xt = center(Xt, y)
-        _, X = center(X, y)
+        if Xt_centered is None:
+            _, Xt_centered = center(Xt, y)
+        if X_centered is None:
+            _, X_centered = center(X, y)
 
         # Initialize
         self.aps_ = [copy(w) for w in self.weights_]
@@ -359,9 +372,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     shrink = np.nan
                 else:
                     modes = range(1, order + 1)
-                    G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
+                    G = tl.tenalg.multi_mode_dot(
+                        Xt_centered, self.aps_, modes=modes, skip=k
+                    )
                     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    cov_cross = tl.tensordot(X, G.conj(), axes=(modes, modes))
+                    cov_cross = tl.tensordot(X_centered, G, axes=(modes, modes))
                     cov_g, shrink = mode_scatter(
                         G,
                         k,
@@ -370,14 +385,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                         assume_centered=True,
                     )
                     ap = tl.solve(cov_g.T, cov_cross.T).T
-
-                    # Gk = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
-                    # gk = tl.unfold(Gk, k + 1)
-                    # xk = tl.unfold(X, k + 1)
-
-                    # ap, *_ = lstsq(gk.T, xk.T, rcond=shape[k] * np.finfo(X.dtype).eps)
-                    ## ap = lstsq_ridge(gk.T, xk.T, lambda_=1)
-                    # ap = ap.T
 
                     update = tl.metrics.regression.MSE(
                         ap / tl.norm(self.aps_[k]), self.aps_[k] / tl.norm(self.aps_[k])
@@ -411,11 +418,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         modes = [k + 1 for k in range(order)]
         rank = self.rank
         if isinstance(rank, np.integer) or isinstance(rank, int):
-            rank = [min(shape[k], self.rank) for k in range(order)]
+            rank = [self.rank for k in range(order)]
         elif self.rank is None:
             rank = shape
         else:
             rank = self.rank
+
+        for k in range(order):
+            if rank[k] > shape[k]:
+                raise ValueError(
+                    f"mode rank must be less or equal to dimension ({rank[k]} > {shape[k]})"
+                )
 
         if self.init == "mlsvd":
             (_, self.weights_), _ = tl.decomposition.partial_tucker(
@@ -436,10 +449,19 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                         (shape[k], rank[k]), random_state=self.random_state
                     )
                     self.weights_[k], _ = tl.qr(self.weights_[k], mode="reduced")
+                elif self.init == "eye":
+                    self.weights_[k] = tl.eye((shape[k]))[:, : rank[k]]
+                elif isinstance(self.init, list):
+                    if tl.is_tensor(self.init[k]):
+                        self.weights_[k] = self.init[k]
+                    else:
+                        self.weights_[k] = tl.tensor(self.init[k])
                 else:
-                    raise NotImplementedError
-        for k in range(order):
-            self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
+                    raise ValueError(
+                        "init must be one of ['mlsvd', 'svd', 'random', 'eye'] or a list of weight matrices"
+                    )
+        # for k in range(order):
+        #    self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
 
     def transform(self, X, y=None):
         if not tl.is_tensor(X):
@@ -678,10 +700,6 @@ class InfoBTTDA(BTTDA):
         if self.n_blocks_:
             Xt = self.transform(X)
         ranks = list(2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int))
-        # ranks = [1]
-        # ranks = [2]
-        # ranks.append(max(shape))
-        # ranks = list(range(1, min(shape) + 1))
         best_block = None
         best_Xtb = None
         best_info_crit = np.inf
@@ -738,6 +756,7 @@ class GreedyBTTDA(BTTDA):
         extra_train_info=False,
         verbose=False,
         cv=None,
+        truncate=True,
     ):
         super().__init__(
             ranks=ranks,
@@ -746,19 +765,28 @@ class GreedyBTTDA(BTTDA):
             verbose=verbose,
         )
         self.cv = cv
+        self.truncate = truncate
 
     def fit(self, X, y=None):
+        if not tl.is_tensor(X):
+            X = tl.tensor(X)
         n_samples, *shape = X.shape
         if self.cv is None:
             self.cv = StratifiedKFold(shuffle=True, random_state=42)
         self._fold_blocks_ = []
+        self._fold_err = []
         for f in range(self.cv.n_splits):
             self._fold_blocks_.append([])
+            self._fold_err.append(copy(X))
         self.rank_grid_ = list(
             2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
         )
-        # self.rank_grid_ = [1]
-        return super().fit(X, y=y)
+        super().fit(X, y=y)
+        if self.truncate:
+            best_n_blocks = np.argmax(self.train_info_["val_score"]) + 1
+            self.blocks_ = self.blocks_[:best_n_blocks]
+
+        return self
 
     def _fit_block(self, X, err, y, _, hoda_params, class_counts):
         n_samples, *shape = X.shape
@@ -766,42 +794,43 @@ class GreedyBTTDA(BTTDA):
         clf = self._clf_pipe()
         train_scores = tl.zeros((self.cv.n_splits, len(self.rank_grid_)))
         val_scores = tl.zeros((self.cv.n_splits, len(self.rank_grid_)))
-        # test_scores = tl.zeros((self.cv.n_splits, len(self.rank_grid_)))
         fold_blocks = []
         # splits must stay consistent over blocks
-        for fold, (train_idc, val_test_idc) in enumerate(self.cv.split(err, y)):
-            # test_idc = val_test_idc[: len(val_test_idc) // 2]
-            # val_idc = val_test_idc[len(val_test_idc) // 2 :]
-            val_idc = val_test_idc
+        for fold, (train_idc, val_idc) in enumerate(self.cv.split(X, y)):
             rank_blocks = []
+            if self.n_blocks_:
+                Xt = self._fold_transform(X, fold)
+            else:
+                Xt = tl.zeros((n_samples, 0))
             for ri, r in enumerate(self.rank_grid_):
                 hoda = HODA(**hoda_params)
                 hoda.set_params(rank=r)
-                hoda.fit(err[train_idc], y[train_idc])
-                Xtb = hoda.transform(err)
+                hoda.fit(self._fold_err[fold][train_idc], y[train_idc])
+                Xtb = hoda.transform(self._fold_err[fold])
+                # hoda.fit(err[train_idc], y[train_idc])
+                # Xtb = hoda.transform(err)
                 Xtb = tl.reshape(Xtb, (n_samples, -1))
-                if self.n_blocks_:
-                    Xt = self._fold_transform(X, fold)
-                    # Xt = self.transform(X)
-                    Xtb = tl.concatenate([Xt, Xtb], axis=1)
+                Xtb = tl.concatenate([Xt, Xtb], axis=1)
                 clf.fit(Xtb[train_idc], y[train_idc])
                 y_pred = clf.decision_function(Xtb)
                 train_scores[fold, ri] = roc_auc_score(y[train_idc], y_pred[train_idc])
                 val_scores[fold, ri] = roc_auc_score(y[val_idc], y_pred[val_idc])
-                # test_scores[fold, ri] = roc_auc_score(y[test_idc], y_pred[test_idc])
                 rank_blocks.append(hoda)
             fold_blocks.append(rank_blocks)
         rank_train_scores = tl.mean(train_scores, axis=0)
         rank_val_scores = tl.mean(val_scores, axis=0)
-        # rank_test_scores = tl.mean(test_scores, axis=0)
         best_rank_idx = int(tl.argmax(rank_val_scores))
         for f in range(self.cv.n_splits):
             best_fold_block = fold_blocks[f][best_rank_idx]
-            best_fold_block.fit_forward(err, y)
+            best_fold_block.fit_forward(self._fold_err[f], y)
+            # best_fold_block.fit_forward(err, y)
             self._fold_blocks_[f].append(best_fold_block)
+
+            self._fold_err[f] -= best_fold_block.inv_transform(
+                best_fold_block.transform(self._fold_err[f])
+            )
         train_score = float(rank_train_scores[best_rank_idx])
         val_score = float(rank_val_scores[best_rank_idx])
-        # test_score = float(rank_test_scores[best_rank_idx])
         best_rank = int(self.rank_grid_[best_rank_idx])
         best_block = HODA(**hoda_params)
         best_block.set_params(rank=best_rank, forward=True)
@@ -810,10 +839,8 @@ class GreedyBTTDA(BTTDA):
             rank=best_rank,
             train_score=train_score,
             val_score=val_score,
-            # test_score=test_score,
             train_scores=tl.to_numpy(val_scores),
             val_scores=tl.to_numpy(val_scores),
-            # test_scores=tl.to_numpy(val_scores),
         )
         return best_block, info
 

@@ -91,7 +91,7 @@ class Tensorize(TransformerMixin):
         elif self.method == "hankel":
             X = hankel_tensor(X, **params)
         if not tl.is_tensor(X):
-            X = tl.tensor()
+            X = tl.tensor(X)
         return X
 
 
