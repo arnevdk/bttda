@@ -755,7 +755,7 @@ class GreedyBTTDA(BTTDA):
         hoda_params = self.hoda_params or dict()
         hoda = HODA(**hoda_params)
         hoda.set_params(rank=r)
-        hoda.fit(err[train_idc], y[train_idc])
+        hoda.fit_backward(err[train_idc], y[train_idc])
         Xtb = hoda.transform(err)
         Xtb = tl.reshape(Xtb, (n_samples, -1))
         Xtb = tl.concatenate([Xt, Xtb], axis=1)
