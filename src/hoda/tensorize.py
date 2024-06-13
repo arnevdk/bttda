@@ -9,7 +9,7 @@ from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 def vec(X, y=None, extra=None):
     x = X.reshape((X.shape[0], -1))
-    return tl.to_numpy(x)
+    return x
 
 
 def hankel_tensor(X, y=None):
@@ -87,7 +87,7 @@ def crop(X, begin=0, end=None, sfreq=None, tmin=None):
 
 class Vectorize(FunctionTransformer):
     def __init__(self, **params):
-        super().__init__(func=vec, **params)
+        super().__init__(func=lambda x: tl.to_numpy(vec(x)), **params)
 
 
 class Tensorize(TransformerMixin):

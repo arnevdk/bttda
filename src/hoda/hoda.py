@@ -140,8 +140,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     def fit(self, X, y, classes=None, class_counts=None):
         # Convert to tensor
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         # Calculate means, centering and classes once (slow on GPU)
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -168,8 +168,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     ):
         # TODO: calculate train info for initialization
         # Convert to tensor
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         n_samples, *shape = X.shape
         order = len(shape)
 
@@ -340,8 +340,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
         # TODO: add regularization
         # Convert to tensor
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         n_samples, *shape = X.shape
         order = len(shape)
 
@@ -466,8 +466,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         #    self.weights_[k] = self.weights_[k] / tl.norm(self.weights_[k])
 
     def transform(self, X, y=None):
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
             X, self.weights_, modes=range(1, order + 1), transpose=True
@@ -475,8 +475,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None):
-        if not tl.is_tensor(Xt):
-            Xt = tl.tensor(Xt)
+        # if not tl.is_tensor(Xt):
+        #    Xt = tl.tensor(Xt)
         order = Xt.ndim - 1
         modes = [k + 1 for k in range(order)]
         return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes)
@@ -548,8 +548,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.extra_train_info = extra_train_info
 
     def fit(self, X, y=None, blocks=None):
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         n_samples, *shape = X.shape
 
         self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -598,8 +598,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return sum([b.n_params_ for b in self.blocks_])
 
     def transform(self, X, y=None, blocks=None):
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         err = copy(X)
         n_samples, *_ = X.shape
         Xt = []
@@ -680,8 +680,8 @@ class GreedyBTTDA(BTTDA):
         super().__init__(**params)
 
     def fit(self, X, y):
-        if not tl.is_tensor(X):
-            X = tl.tensor(X)
+        # if not tl.is_tensor(X):
+        #    X = tl.tensor(X)
         n_samples, *shape = X.shape
 
         cv = self.cv
@@ -803,8 +803,8 @@ class GreedyBTTDA(BTTDA):
 #        self.truncate = truncate
 #
 #    def fit(self, X, y=None):
-#        if not tl.is_tensor(X):
-#            X = tl.tensor(X)
+#        #if not tl.is_tensor(X):
+#        #    X = tl.tensor(X)
 #        n_samples, *shape = X.shape
 #        if self.cv is None:
 #            self.cv = StratifiedKFold(shuffle=True, random_state=42)
@@ -880,8 +880,8 @@ class GreedyBTTDA(BTTDA):
 #        return best_block, info
 #
 #    def _fold_transform(self, X, fold, y=None, n_blocks=None):
-#        if not tl.is_tensor(X):
-#            X = tl.tensor(X)
+#        #if not tl.is_tensor(X):
+#        #    X = tl.tensor(X)
 #        err = copy(X)
 #        n_samples, *_ = X.shape
 #        Xt = []
