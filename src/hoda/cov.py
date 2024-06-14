@@ -52,9 +52,10 @@ def mode_scatter(
     elif shrinkage == "loocv":
         raise NotImplementedError
     # Shrink
-    if not n_features in eyes.keys():
-        eyes[n_features] = tl.eye(n_features)
-    structured = eyes[n_features]
+    #if not n_features in eyes.keys():
+    #    eyes[n_features] = tl.eye(n_features)
+    #structured = eyes[n_features]
+    structured = tl.eye(n_features)
     structured *= (tl.trace(scatter) / n_features)
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
     return scatter, shrinkage
