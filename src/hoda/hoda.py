@@ -139,6 +139,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.forward = forward
 
     def fit(self, X, y, classes=None, class_counts=None):
+        assert tl.is_tensor(X)
         # Convert to tensor
         # if not tl.is_tensor(X):
         #    X = tl.tensor(X)
@@ -166,6 +167,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def fit_backward(
         self, X, y, X_centered=None, means=None, classes=None, class_counts=None
     ):
+        assert tl.is_tensor(X)
         # TODO: calculate train info for initialization
         # Convert to tensor
         # if not tl.is_tensor(X):
@@ -338,6 +340,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         }
 
     def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
+        assert tl.is_tensor(X)
         # TODO: add regularization
         # Convert to tensor
         # if not tl.is_tensor(X):
@@ -548,6 +551,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.extra_train_info = extra_train_info
 
     def fit(self, X, y=None, blocks=None):
+        assert tl.is_tensor(X)
         # if not tl.is_tensor(X):
         #    X = tl.tensor(X)
         n_samples, *shape = X.shape
@@ -555,7 +559,9 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
 
-        hoda_params = self.hoda_params or dict()
+        hoda_params = self.hoda_params
+        if hoda_params is None:
+            hoda_params=dict()
         self.blocks_ = []
         self.train_info_ = []
 
@@ -665,21 +671,28 @@ class BTTDA(BaseEstimator, TransformerMixin):
 class GreedyBTTDA(BTTDA):
     def __init__(
         self,
+        hoda_params=None,
+        verbose=False,
+        extra_train_info=False,
         max_blocks=16,
         cv=None,
         rank_grid=None,
         truncate=True,
         n_jobs=None,
-        **params,
     ):
+        self.hoda_params = hoda_params
+        self.verbose = verbose
+        self.extra_train_info = extra_train_info
+
         self.max_blocks = max_blocks
         self.cv = cv
         self.rank_grid = rank_grid
         self.truncate = truncate
         self.n_jobs = n_jobs
-        super().__init__(**params)
+        super().__init__(hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info)
 
     def fit(self, X, y):
+        assert tl.is_tensor(X)
         # if not tl.is_tensor(X):
         #    X = tl.tensor(X)
         n_samples, *shape = X.shape
@@ -704,6 +717,8 @@ class GreedyBTTDA(BTTDA):
             if self.verbose:
                 print(f"Model selection block {b+1}/{self.max_blocks}...")
             results = []
+            
+            eval_args = []
             for fold, (train_idc, val_idc) in enumerate(splits):
                 if b:
                     Xt = self.transform(X, blocks=[fb[fold] for fb in fold_blocks])
@@ -711,17 +726,17 @@ class GreedyBTTDA(BTTDA):
                 else:
                     Xt = tl.zeros((n_samples, 0))
                     err = copy(X)
-                res = Parallel(n_jobs=self.n_jobs)(
-                    delayed(self._eval_fold_rank)(
-                        Xt, err, y, b, fold, r, train_idc, val_idc
-                    )
-                    for r in rank_grid
-                )
-                results += res
+                for r in rank_grid:
+                    eval_args.append((Xt, err, y,b,fold,r,train_idc,val_idc))
+            res = Parallel(n_jobs=self.n_jobs)(
+                delayed(self._eval_fold_rank)(*args) for args in eval_args
+            )
+            results += res
             self.model_select_info_ += results
 
             # Extract optimal rank
             results = pd.DataFrame(results)
+            self.model_selection_info_=results
             rank_results = results.groupby("rank")["val_score"].aggregate("mean")
             best_val_score = rank_results.max()
             best_rank = rank_results.idxmax()
@@ -752,7 +767,9 @@ class GreedyBTTDA(BTTDA):
 
     def _eval_fold_rank(self, Xt, err, y, b, fold, r, train_idc, val_idc):
         n_samples = len(y)
-        hoda_params = self.hoda_params or dict()
+        hoda_params = self.hoda_params
+        if hoda_params is None:
+            hoda_params = hoda_params
         hoda = HODA(**hoda_params)
         hoda.set_params(rank=r)
         hoda.fit_backward(err[train_idc], y[train_idc])

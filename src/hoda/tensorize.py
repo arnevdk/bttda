@@ -85,9 +85,13 @@ def crop(X, begin=0, end=None, sfreq=None, tmin=None):
         return X[..., begin:end]
 
 
-class Vectorize(FunctionTransformer):
-    def __init__(self, **params):
-        super().__init__(func=lambda x: tl.to_numpy(vec(x)), **params)
+class Vectorize(TransformerMixin):
+
+    def fit(self, X,y=None):
+        return self
+    
+    def transform(self,X,y=None):
+        return tl.to_numpy(vec(X))
 
 
 class Tensorize(TransformerMixin):

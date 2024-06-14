@@ -13,11 +13,14 @@ try:
 except ImportError:
     pass
 
+eyes = dict()
 
 def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
 ):
     """Calculate the scatter matrix along a given tensor mode"""
+    global eyes
+
     _, *shape = X.shape
     order = len(shape)
     n_features = shape[k]
@@ -49,7 +52,10 @@ def mode_scatter(
     elif shrinkage == "loocv":
         raise NotImplementedError
     # Shrink
-    structured = (tl.trace(scatter) / n_features) * tl.eye(scatter.shape[0])
+    if not n_features in eyes.keys():
+        eyes[n_features] = tl.eye(n_features)
+    structured = eyes[n_features]
+    structured *= (tl.trace(scatter) / n_features)
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
     return scatter, shrinkage
 
