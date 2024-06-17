@@ -303,7 +303,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 if u.shape[-1] != self.weights_[k].shape[-1]:
                     update = np.inf
                 else:
-                    update = tl.metrics.regression.MSE(u, self.weights_[k])
+                    update = tl.norm(u - self.weights_[k])
+                    update /= tl.norm(self.weights_[k])
 
                 converged = update < self.tol and converged
 
@@ -380,20 +381,27 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     G = tl.tenalg.multi_mode_dot(
                         Xt_centered, self.aps_, modes=modes, skip=k
                     )
+
                     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
                     cov_cross = tl.tensordot(X_centered, G, axes=(modes, modes))
                     cov_g, shrink = mode_scatter(
                         G,
                         k,
-                        # shrinkage=self.shrinkage,
-                        shrinkage=0,
+                        shrinkage=self.shrinkage,
+                        # shrinkage=0,
                         assume_centered=True,
                     )
                     ap = tl.solve(cov_g.T, cov_cross.T).T
 
-                    update = tl.metrics.regression.MSE(
-                        ap / tl.norm(self.aps_[k]), self.aps_[k] / tl.norm(self.aps_[k])
-                    )
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X_centered, k + 1)
+                    # ap, *_ = lstsq(Gk.T, Xk.T)
+                    ## ap = lstsq_ridge(Gk.T, Xk.T, lambda_=0)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    update = tl.norm(ap - self.aps_[k])
+                    update /= tl.norm(self.aps_[k])
                 self.aps_[k] = ap
                 converged = update < self.tol and converged
 
@@ -531,8 +539,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         cross_corr = cross_corr[G_flat.shape[-1] :, : G_flat.shape[-1]].T
         cross_corr = tl.metrics.regression.MSE(cross_corr, 0)
         mse = tl.metrics.regression.MSE(X, X_approx)
+        nmse = mse / tl.metrics.regression.MSE(X, 0)
         info = dict()
         info["mse"] = float(mse)
+        info["nmse"] = float(nmse)
         info["err_cross_corr"] = float(cross_corr)
         return info
 
@@ -550,7 +560,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.verbose = verbose
         self.extra_train_info = extra_train_info
 
-    def fit(self, X, y=None, blocks=None):
+    def fit(self, X, y=None, blocks=None, X_test=None, y_test=None):
         assert tl.is_tensor(X)
         # if not tl.is_tensor(X):
         #    X = tl.tensor(X)
@@ -561,7 +571,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
         hoda_params = self.hoda_params
         if hoda_params is None:
-            hoda_params=dict()
+            hoda_params = dict()
         self.blocks_ = []
         self.train_info_ = []
 
@@ -586,6 +596,14 @@ class BTTDA(BaseEstimator, TransformerMixin):
             train_info_row["rank"] = block.rank_
             if self.extra_train_info:
                 train_info_row.update(self._extra_train_info(X, y, class_counts))
+            if X_test is not None:
+                train_info_row["split"] = "train"
+                test_info_row = dict(train_info_row)
+                test_info_row.update(
+                    self._extra_train_info(X_test, y_test, class_counts)
+                )
+                test_info_row["split"] = "test"
+                self.train_info_.append(test_info_row)
             self.train_info_.append(train_info_row)
 
         # Convert train info to list dict
@@ -643,6 +661,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         Xt = self.transform(X)
         X_rec = self.inv_transform(Xt)
         mse = tl.metrics.regression.MSE(X_rec, X)
+        nmse = mse / tl.metrics.regression.MSE(X, 0)
         # Objective: multi-way F-score
         # trace-ratio
         F_tr = f_multiway(
@@ -663,6 +682,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
         info = dict()
         info["mse"] = float(mse)
+        info["nmse"] = float(nmse)
         info["F_tr"] = float(F_tr)
         info["F_rt"] = float(F_rt)
         return info
@@ -689,9 +709,11 @@ class GreedyBTTDA(BTTDA):
         self.rank_grid = rank_grid
         self.truncate = truncate
         self.n_jobs = n_jobs
-        super().__init__(hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info)
+        super().__init__(
+            hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
+        )
 
-    def fit(self, X, y):
+    def fit(self, X, y, X_test=None, y_test=None):
         assert tl.is_tensor(X)
         # if not tl.is_tensor(X):
         #    X = tl.tensor(X)
@@ -717,7 +739,7 @@ class GreedyBTTDA(BTTDA):
             if self.verbose:
                 print(f"Model selection block {b+1}/{self.max_blocks}...")
             results = []
-            
+
             eval_args = []
             for fold, (train_idc, val_idc) in enumerate(splits):
                 if b:
@@ -727,7 +749,7 @@ class GreedyBTTDA(BTTDA):
                     Xt = tl.zeros((n_samples, 0))
                     err = copy(X)
                 for r in rank_grid:
-                    eval_args.append((Xt, err, y,b,fold,r,train_idc,val_idc))
+                    eval_args.append((Xt, err, y, b, fold, r, train_idc, val_idc))
             res = Parallel(n_jobs=self.n_jobs)(
                 delayed(self._eval_fold_rank)(*args) for args in eval_args
             )
@@ -736,7 +758,7 @@ class GreedyBTTDA(BTTDA):
 
             # Extract optimal rank
             results = pd.DataFrame(results)
-            self.model_selection_info_=results
+            self.model_selection_info_ = results
             rank_results = results.groupby("rank")["val_score"].aggregate("mean")
             best_val_score = rank_results.max()
             best_rank = rank_results.idxmax()
@@ -762,7 +784,7 @@ class GreedyBTTDA(BTTDA):
         if self.truncate:
             best_n_blocks = np.argmax(val_scores) + 1
             self.ranks = self.ranks[:best_n_blocks]
-        super().fit(X, y)
+        super().fit(X, y, X_test=X_test, y_test=y_test)
         return self
 
     def _eval_fold_rank(self, Xt, err, y, b, fold, r, train_idc, val_idc):
@@ -797,127 +819,5 @@ class GreedyBTTDA(BTTDA):
             StandardScaler(),
             # SelectF(alpha=0.5),
             LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
+            # LinearDiscriminantAnalysis(),
         )
-
-
-# class GreedyBTTDA(BTTDA):
-#    def __init__(
-#        self,
-#        ranks=None,
-#        hoda_params=None,
-#        extra_train_info=False,
-#        verbose=False,
-#        cv=None,
-#        truncate=True,
-#    ):
-#        super().__init__(
-#            ranks=ranks,
-#            hoda_params=hoda_params,
-#            extra_train_info=extra_train_info,
-#            verbose=verbose,
-#        )
-#        self.cv = cv
-#        self.truncate = truncate
-#
-#    def fit(self, X, y=None):
-#        #if not tl.is_tensor(X):
-#        #    X = tl.tensor(X)
-#        n_samples, *shape = X.shape
-#        if self.cv is None:
-#            self.cv = StratifiedKFold(shuffle=True, random_state=42)
-#        self._fold_blocks_ = []
-#        self._fold_err = []
-#        for f in range(self.cv.n_splits):
-#            self._fold_blocks_.append([])
-#            self._fold_err.append(copy(X))
-#        self.rank_grid_ = list(
-#            2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
-#        )
-#        super().fit(X, y=y)
-#        if self.truncate:
-#            best_n_blocks = np.argmax(self.train_info_["val_score"]) + 1
-#            self.blocks_ = self.blocks_[:best_n_blocks]
-#
-#        return self
-#
-#    def _fit_block(self, X, err, y, _, hoda_params, class_counts):
-#        n_samples, *shape = X.shape
-#
-#        clf = self.clf_pipe()
-#        train_scores = tl.zeros((self.cv.n_splits, len(self.rank_grid_)))
-#        val_scores = tl.zeros((self.cv.n_splits, len(self.rank_grid_)))
-#        fold_blocks = []
-#        # splits must stay consistent over blocks
-#        for fold, (train_idc, val_idc) in enumerate(self.cv.split(X, y)):
-#            rank_blocks = []
-#            if self.n_blocks_:
-#                Xt = self._fold_transform(X, fold)
-#            else:
-#                Xt = tl.zeros((n_samples, 0))
-#            for ri, r in enumerate(self.rank_grid_):
-#                hoda = HODA(**hoda_params)
-#                hoda.set_params(rank=r)
-#                hoda.fit(self._fold_err[fold][train_idc], y[train_idc])
-#                Xtb = hoda.transform(self._fold_err[fold])
-#                # hoda.fit(err[train_idc], y[train_idc])
-#                # Xtb = hoda.transform(err)
-#                Xtb = tl.reshape(Xtb, (n_samples, -1))
-#                Xtb = tl.concatenate([Xt, Xtb], axis=1)
-#                clf.fit(Xtb[train_idc], y[train_idc])
-#                y_pred = clf.decision_function(Xtb)
-#                train_scores[fold, ri] = roc_auc_score(y[train_idc], y_pred[train_idc])
-#                val_scores[fold, ri] = roc_auc_score(y[val_idc], y_pred[val_idc])
-#                rank_blocks.append(hoda)
-#            fold_blocks.append(rank_blocks)
-#        rank_train_scores = tl.mean(train_scores, axis=0)
-#        rank_val_scores = tl.mean(val_scores, axis=0)
-#        best_rank_idx = int(tl.argmax(rank_val_scores))
-#        for f in range(self.cv.n_splits):
-#            best_fold_block = fold_blocks[f][best_rank_idx]
-#            best_fold_block.fit_forward(self._fold_err[f], y)
-#            # best_fold_block.fit_forward(err, y)
-#            self._fold_blocks_[f].append(best_fold_block)
-#
-#            self._fold_err[f] -= best_fold_block.inv_transform(
-#                best_fold_block.transform(self._fold_err[f])
-#            )
-#        train_score = float(rank_train_scores[best_rank_idx])
-#        val_score = float(rank_val_scores[best_rank_idx])
-#        best_rank = int(self.rank_grid_[best_rank_idx])
-#        best_block = HODA(**hoda_params)
-#        best_block.set_params(rank=best_rank, forward=True)
-#        best_block.fit(err, y)
-#        info = dict(
-#            rank=best_rank,
-#            train_score=train_score,
-#            val_score=val_score,
-#            train_scores=tl.to_numpy(val_scores),
-#            val_scores=tl.to_numpy(val_scores),
-#        )
-#        return best_block, info
-#
-#    def _fold_transform(self, X, fold, y=None, n_blocks=None):
-#        #if not tl.is_tensor(X):
-#        #    X = tl.tensor(X)
-#        err = copy(X)
-#        n_samples, *_ = X.shape
-#        Xt = []
-#        if n_blocks is None:
-#            n_blocks = self.n_blocks_
-#        for b in range(n_blocks):
-#            block = self._fold_blocks_[fold][b]
-#            Xtb = block.transform(err, y)
-#            Xt.append(Xtb.reshape(n_samples, -1))
-#            err -= block.inv_transform(Xtb)
-#
-#        Xt = tl.concatenate(Xt, axis=1)
-#        return Xt
-#
-#    @staticmethod
-#    def clf_pipe():
-#        return make_pipeline(
-#            Vectorize(),
-#            StandardScaler(),
-#            SelectF(alpha=0.5),
-#            LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
-#        )
