@@ -149,7 +149,9 @@ def f_multiway(
         )
         means_flat = tl.unfold(means, 0)
         scatter_b, _ = mode_scatter(means_flat, 0, assume_centered=False, shrinkage=0)
-        _, w = trunc_eigh(scatter_b, scatter_w, rank=None, method="lanczos")
+        _, w = trunc_eigh(
+            scatter_b, scatter_w, rank=X_centered_flat.shape[-1], method="lanczos"
+        )
         F = tl.sum(w)
     else:
         raise ValueError(

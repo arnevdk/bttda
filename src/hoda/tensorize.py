@@ -37,7 +37,6 @@ def stf_tensor(
     morlet_params=None,
     bin_freq=25,
     zscore=False,
-    decim=1,
 ):
     # TFR
     if morlet_params is None:
@@ -71,8 +70,6 @@ def stf_tensor(
         std = Xt.std(axis=0)
         Xt = (Xt - mean) / std
 
-    # Decimate
-    Xt = Xt[:, :, :, ::decim]
     return Xt
 
 
@@ -86,11 +83,10 @@ def crop(X, begin=0, end=None, sfreq=None, tmin=None):
 
 
 class Vectorize(TransformerMixin):
-
-    def fit(self, X,y=None):
+    def fit(self, X, y=None):
         return self
-    
-    def transform(self,X,y=None):
+
+    def transform(self, X, y=None):
         return tl.to_numpy(vec(X))
 
 

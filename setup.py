@@ -16,6 +16,7 @@ setup(
             "dask",
             "jupyter",
             "seaborn",
+            "opt_einsum",
         ]
     },
 )

@@ -15,6 +15,7 @@ except ImportError:
 
 eyes = dict()
 
+
 def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
 ):
@@ -31,16 +32,18 @@ def mode_scatter(
     if not assume_centered:
         X = X - tl.mean(X, axis=0)
     scatter = tl.tensordot(X, X, axes=(modes, modes))
+    # Xf = tl.unfold(X, k + 1)
+    # scatter = Xf @ Xf.T
     # Force Toeplitz
     if toeplitz is not None and k in toeplitz:
         scatter = force_toeplitz(scatter, taper=taper)
     # Determine shrinkage
     if shrinkage == "lw":
-        Xf = tl.unfold(X, k + 1).T
-        shrinkage = ledoit_wolf_shrinkage(Xf, assume_centered=assume_centered)
+        Xf = tl.unfold(X, k + 1)
+        shrinkage = ledoit_wolf_shrinkage(Xf.T, assume_centered=assume_centered)
     elif shrinkage == "oas":
-        Xf = tl.unfold(X, k + 1).T
-        shrinkage = oas(Xf, assume_centered=assume_centered, emp_cov=scatter)
+        Xf = tl.unfold(X, k + 1)
+        shrinkage = oas(Xf.T, assume_centered=assume_centered, emp_cov=scatter)
     elif shrinkage == "ell1":
         raise NotImplementedError
     elif shrinkage == "ell2":
@@ -52,11 +55,11 @@ def mode_scatter(
     elif shrinkage == "loocv":
         raise NotImplementedError
     # Shrink
-    #if not n_features in eyes.keys():
+    # if not n_features in eyes.keys():
     #    eyes[n_features] = tl.eye(n_features)
-    #structured = eyes[n_features]
+    # structured = eyes[n_features]
     structured = tl.eye(n_features)
-    structured *= (tl.trace(scatter) / n_features)
+    structured *= tl.trace(scatter) / n_features
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
     return scatter, shrinkage
 

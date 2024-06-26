@@ -178,8 +178,10 @@ def less(a, b):
 
 def lstsq(a, b, **kwargs):
     if tl.get_backend() == "numpy":
+        kwargs.setdefault("rcond", None)
         return np.linalg.lstsq(a, b, **kwargs)
     elif tl.get_backend() == "cupy":
+        kwargs.setdefault("rcond", None)
         return cupy.linalg.lstsq(a, b, **kwargs)
     else:
         raise NotImplementedError
