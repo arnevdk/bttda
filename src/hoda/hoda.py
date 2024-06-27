@@ -11,7 +11,8 @@ from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
 from sklearn.metrics import log_loss, roc_auc_score
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
+                                     cross_validate)
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm.notebook import tqdm
@@ -109,7 +110,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         max_iter=256,
         tol=1e-8,
         rank=None,
-        init="svd",
+        init="eye",
         shrinkage="lw",
         toeplitz=None,
         taper=False,
@@ -223,7 +224,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
             iterator = tqdm(iterator)
-            iterator.set_description(f"Backward model rank={self.rank_}")
+            iterator.set_description(f"Backward HODA model rank={self.rank_}")
         for self.iter_ in iterator:
             converged = True
             for k in range(order):
@@ -617,9 +618,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
     def n_params_(self):
         return sum([b.n_params_ for b in self.blocks_])
 
-    def transform(self, X, y=None, blocks=None):
-        # if not tl.is_tensor(X):
-        #    X = tl.tensor(X)
+    def transform(self, X, y=None, blocks=None, return_err=False):
+        assert tl.is_tensor(X)
         err = copy(X)
         n_samples, *_ = X.shape
         Xt = []
@@ -628,10 +628,11 @@ class BTTDA(BaseEstimator, TransformerMixin):
         for b, block in enumerate(blocks):
             Xtb = block.transform(err, y)
             Xt.append(Xtb.reshape(n_samples, -1))
-            if b < len(blocks) - 1:
-                err -= block.inv_transform(Xtb)
+            err -= block.inv_transform(Xtb)
 
         Xt = tl.concatenate(Xt, axis=1)
+        if return_err:
+            return Xt, err
         return Xt
 
     def inv_transform(self, Xt, y=None, n_blocks=None):
@@ -685,95 +686,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return info
 
 
-class GreedyBTTDA(BTTDA):
-    def __init__(
-        self,
-        hoda_params=None,
-        verbose=False,
-        extra_train_info=False,
-        max_blocks=16,
-        cv=None,
-        rank_grid=None,
-        truncate=True,
-        n_jobs=None,
-    ):
-        super().__init__(
-            hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
-        )
-        self.max_blocks = max_blocks
-        self.cv = cv
-        self.rank_grid = rank_grid
-        self.truncate = truncate
-        self.n_jobs = n_jobs
-
-    def fit(self, X, y=None):
-        assert tl.is_tensor(X)
-        _, *shape = X.shape
-        # Set some defaults
-        cv = self.cv
-        if cv is None:
-            cv = StratifiedKFold(shuffle=True)
-        rank_grid = self.rank_grid
-        if rank_grid is None:
-            rank_grid = [
-                int(r)
-                for r in 2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
-            ]
-
-        # Greedy rank selection
-        self.ranks = []
-        self.val_scores_ = []
-        for b in range(self.max_blocks):
-            if self.verbose:
-                print(f"Model selection block {b+1}/{self.max_blocks}...")
-
-            param_grid = dict(bttda__ranks=[self.ranks + [r] for r in rank_grid])
-            clf = self.clf_pipe()
-            gs = GridSearchCV(
-                clf,
-                param_grid,
-                scoring="roc_auc",
-                n_jobs=self.n_jobs,
-                refit=False,
-                verbose=self.verbose,
-            )
-            gs.fit(X, y)
-            self.ranks = gs.best_params_["bttda__ranks"]
-            if self.verbose:
-                print(f"Selecting ranks {self.ranks}")
-            self.val_scores_.append(gs.best_score_)
-
-        if self.truncate:
-            best_n_blocks = np.argmax(self.val_scores_) + 1
-            self.ranks = self.ranks[:best_n_blocks]
-        super().fit(X, y)
-        return self
-
-    def clf_pipe(self):
-        bttda_params = dict(
-            hoda_params=self.hoda_params,
-            extra_train_info=False,
-            verbose=self.verbose,
-        )
-        pipe = Pipeline(
-            [
-                ("bttda", BTTDA(bttda_params)),
-                ("clf", self.clf()),
-            ]
-        )
-        return pipe
-
-    @staticmethod
-    def clf():
-        pipe = make_pipeline(
-            Vectorize(),
-            StandardScaler(),
-            # SelectF(alpha=0.5),
-            LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
-        )
-        return pipe
-
-
 # class GreedyBTTDA(BTTDA):
 #    def __init__(
 #        self,
@@ -786,178 +698,220 @@ class GreedyBTTDA(BTTDA):
 #        truncate=True,
 #        n_jobs=None,
 #    ):
-#        self.hoda_params = hoda_params
-#        self.verbose = verbose
-#        self.extra_train_info = extra_train_info
-#
+#        super().__init__(
+#            hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
+#        )
 #        self.max_blocks = max_blocks
 #        self.cv = cv
 #        self.rank_grid = rank_grid
 #        self.truncate = truncate
 #        self.n_jobs = n_jobs
-#        super().__init__(
-#            hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
-#        )
 #
-#    def fit(self, X, y, X_test=None, y_test=None):
+#    def fit(self, X, y=None):
 #        assert tl.is_tensor(X)
-#        n_samples, *shape = X.shape
-#
+#        _, *shape = X.shape
+#        # Set some defaults
 #        cv = self.cv
 #        if cv is None:
 #            cv = StratifiedKFold(shuffle=True)
 #        rank_grid = self.rank_grid
 #        if rank_grid is None:
-#            rank_grid = list(
-#                2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
-#            )
+#            rank_grid = [
+#                int(r)
+#                for r in 2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
+#            ]
 #
-#        fold_blocks = []
-#        fold_err = []
+#        # Greedy rank selection
+#        self.ranks = []
+#        self.val_scores_ = []
 #        self.model_select_info_ = []
-#        # Evaluate folds and ranks per block
-#        splits = list(cv.split(X, y))
-#        ranks = []
-#        val_scores = []
 #        for b in range(self.max_blocks):
 #            if self.verbose:
 #                print(f"Model selection block {b+1}/{self.max_blocks}...")
-#            results = []
 #
-#            eval_args = []
-#            for fold, (train_idc, val_idc) in enumerate(splits):
-#                if b:
-#                    Xt = self.transform(X, blocks=[fb[fold] for fb in fold_blocks])
-#                    err = fold_err[fold]
-#                else:
-#                    Xt = tl.zeros((n_samples, 0))
-#                    err = copy(X)
-#                for r in rank_grid:
-#                    eval_args.append((Xt, err, y, b, fold, r, train_idc, val_idc))
-#            res = Parallel(n_jobs=self.n_jobs)(
-#                delayed(self._eval_fold_rank)(*args) for args in eval_args
+#            param_grid = dict(bttda__ranks=[self.ranks + [r] for r in rank_grid])
+#            clf = self.clf_pipe()
+#            gs = GridSearchCV(
+#                clf,
+#                param_grid,
+#                scoring="roc_auc",
+#                n_jobs=self.n_jobs,
+#                refit=False,
+#                verbose=self.verbose,
+#                cv=cv,
 #            )
-#            results += res
-#            self.model_select_info_ += results
+#            gs.fit(X, y)
+#            info = pd.DataFrame(gs.cv_results_)
+#            info["block"] = b
+#            self.model_select_info_.append(info)
+#            self.ranks = gs.best_params_["bttda__ranks"]
+#            if self.verbose:
+#                print(f"Selecting ranks {self.ranks}")
+#            self.val_scores_.append(gs.best_score_)
 #
-#            # Extract optimal rank
-#            results = pd.DataFrame(results)
-#            self.model_selection_info_ = results
-#            rank_results = results.groupby("rank")["val_score"].aggregate("mean")
-#            best_val_score = rank_results.max()
-#            best_rank = rank_results.idxmax()
-#            best_blocks = results.loc[results["rank"] == best_rank, "hoda"].tolist()
-#            val_scores.append(best_val_score)
-#            ranks.append(best_rank)
-#            fold_blocks.append(best_blocks)
-#
-#            # Calculate per fold deflation residuals
-#            new_fold_err = []
-#            for fold in range(len(splits)):
-#                block = fold_blocks[-1][fold]
-#                if b:
-#                    err = fold_err[fold]
-#                else:
-#                    err = copy(X)
-#                block.fit_forward(err, y)
-#                err -= block.inv_transform(block.transform(err))
-#                new_fold_err.append(err)
-#            fold_err = new_fold_err
-#
-#        self.ranks = ranks
-#
-#        # Initialize validation models
-#        # val_models = []
-#        # for fold in range(cv.n_splits):
-#        #    val_models.append(
-#        #        BTTDA(
-#        #            hoda_params=self.hoda_params,
-#        #            extra_train_info=self.extra_train_info,
-#        #            verbose=self.verbose,
-#        #        )
-#        #    )
-#        # splits = [(train_idc, test_idc) for train_idc, test_idc in cv.split(X, y)]
-#        ## Greedy model selection
-#        # val_scores = []
-#        # ranks = ()
-#        # for b in range(self.max_blocks):
-#        #    if self.verbose:
-#        #        print(f"Model selection block {b+1}/{self.max_blocks}...")
-#        #    res = []
-#        #    for fold, (train_idc, val_idc) in enumerate(splits):
-#        #        bttda = val_models[fold]
-#        #        blocks = bttda.blocks_.copy() if b else None
-#        #        for r in rank_grid:
-#        #            new_ranks = (*ranks, r)
-#        #            bttda.set_params(ranks=new_ranks)
-#        #            bttda.fit(X[train_idc], y[train_idc], blocks=blocks, forward=False)
-#        #            Xt = bttda.transform(X)
-#        #            clf = self.clf_pipe()
-#        #            clf.fit(Xt[train_idc], y[train_idc])
-#        #            y_pred = clf.decision_function(Xt)
-#        #            val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
-#        #            res.append(
-#        #                dict(
-#        #                    fold=fold,
-#        #                    rank=r,
-#        #                    val_score=val_score,
-#        #                    blocks=bttda.blocks_.copy(),
-#        #                )
-#        #            )
-#        #    res = pd.DataFrame(res)
-#        #    res = res.set_index(["fold", "rank"])
-#        #    val_scores.append(res.groupby("rank").val_score.aggregate("mean").max())
-#        #    print(val_scores)
-#        #    best_rank = res.groupby("rank").val_score.aggregate("mean").idxmax()
-#        #    ranks = (*ranks, best_rank)
-#        #    for fold, (train_idc, val_idc) in enumerate(splits):
-#        #        best_blocks = res.loc[fold, best_rank]["blocks"]
-#        #        val_models[fold].set_params(ranks=ranks)
-#        #        val_models[fold].fit(
-#        #            X[train_idc],
-#        #            y[train_idc],
-#        #            blocks=best_blocks.copy(),
-#        #            forward=True,
-#        #        )
-#
-#        print(val_scores)
+#        self.model_select_info_ = pd.concat(self.model_select_info_)
 #        if self.truncate:
-#            best_n_blocks = np.argmax(val_scores) + 1
-#            ranks = ranks[:best_n_blocks]
-#        self.ranks = ranks
-#        super().fit(X, y, X_test=X_test, y_test=y_test)
+#            best_n_blocks = np.argmax(self.val_scores_) + 1
+#            self.ranks = self.ranks[:best_n_blocks]
+#        super().fit(X, y)
 #        return self
 #
-#    def _eval_fold_rank(self, Xt, err, y, b, fold, r, train_idc, val_idc):
-#        n_samples = len(y)
-#        hoda_params = self.hoda_params
-#        if hoda_params is None:
-#            hoda_params = hoda_params
-#        hoda = HODA(**hoda_params)
-#        hoda.set_params(rank=r)
-#        hoda.fit_backward(err[train_idc], y[train_idc])
-#        Xtb = hoda.transform(err)
-#        Xtb = tl.reshape(Xtb, (n_samples, -1))
-#        Xtb = tl.concatenate([Xt, Xtb], axis=1)
-#        clf = self.clf_pipe()
-#        clf.fit(Xtb[train_idc], y[train_idc])
-#        y_pred = clf.decision_function(Xtb)
-#        train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
-#        val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
-#        return dict(
-#            block=b,
-#            fold=fold,
-#            rank=r,
-#            hoda=hoda,
-#            train_score=train_score,
-#            val_score=val_score,
+#    def clf_pipe(self):
+#        bttda_params = dict(
+#            hoda_params=self.hoda_params,
+#            extra_train_info=False,
+#            verbose=self.verbose,
 #        )
+#        pipe = Pipeline(
+#            [
+#                ("bttda", BTTDA(**bttda_params)),
+#                ("clf", self.clf()),
+#            ]
+#        )
+#        return pipe
 #
 #    @staticmethod
-#    def clf_pipe():
+#    def clf():
 #        return make_pipeline(
 #            Vectorize(),
 #            StandardScaler(),
-#            # SelectF(alpha=0.5),
 #            LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
 #        )
+
+
+class GreedyBTTDA(BTTDA):
+    def __init__(
+        self,
+        hoda_params=None,
+        verbose=False,
+        extra_train_info=False,
+        max_blocks=16,
+        cv=None,
+        rank_grid=None,
+        truncate=True,
+        n_jobs=None,
+    ):
+        self.hoda_params = hoda_params
+        self.verbose = verbose
+        self.extra_train_info = extra_train_info
+
+        self.max_blocks = max_blocks
+        self.cv = cv
+        self.rank_grid = rank_grid
+        self.truncate = truncate
+        self.n_jobs = n_jobs
+        super().__init__(
+            hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
+        )
+
+    def fit(self, X, y, X_test=None, y_test=None):
+        assert tl.is_tensor(X)
+        n_samples, *shape = X.shape
+
+        cv = self.cv
+        if cv is None:
+            cv = StratifiedKFold(shuffle=True)
+        rank_grid = self.rank_grid
+        if rank_grid is None:
+            rank_grid = list(
+                2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
+            )
+            rank_grid.append(min(shape))
+            rank_grid = list(set(rank_grid))
+
+        fold_blocks = []
+        fold_err = []
+        self.model_select_info_ = []
+        # Evaluate folds and ranks per block
+        splits = list(cv.split(X, y))
+        ranks = []
+        self.val_scores_ = []
+        for b in range(self.max_blocks):
+            if self.verbose:
+                print(f"Model selection block {b+1}/{self.max_blocks}...")
+
+            eval_args = []
+            for fold, (train_idc, val_idc) in enumerate(splits):
+                if b:
+                    Xt = self.transform(X, blocks=[fb[fold] for fb in fold_blocks])
+                    err = fold_err[fold]
+                else:
+                    Xt = tl.zeros((n_samples, 0))
+                    err = copy(X)
+                for r in rank_grid:
+                    eval_args.append((Xt, err, y, fold, r, train_idc, val_idc))
+            results = Parallel(n_jobs=self.n_jobs)(
+                delayed(self._eval_fold_rank)(*args) for args in eval_args
+            )
+
+            # Extract optimal rank
+            results = pd.DataFrame(results)
+            rank_results = results.groupby("rank")["val_score"].aggregate("mean")
+            best_val_score = rank_results.max()
+            best_rank = rank_results.idxmax()
+            best_blocks = results.loc[results["rank"] == best_rank, "hoda"].tolist()
+            self.val_scores_.append(best_val_score)
+            ranks.append(best_rank)
+            fold_blocks.append(best_blocks)
+
+            results["block"] = b
+            results["best"] = results["rank"] == best_rank
+            self.model_select_info_.append(results)
+
+            # Calculate per fold deflation residuals
+            new_fold_err = []
+            for fold, (train_idc, test_idc) in enumerate(splits):
+                block = fold_blocks[-1][fold]
+                if b:
+                    err = fold_err[fold]
+                else:
+                    err = copy(X)
+                block.fit_forward(err[train_idc], y[train_idc])
+                err -= block.inv_transform(block.transform(err))
+                new_fold_err.append(err)
+            fold_err = new_fold_err
+
+        self.ranks = ranks
+        self.model_select_info_ = pd.concat(self.model_select_info_)
+
+        if self.truncate:
+            best_n_blocks = np.argmax(self.val_scores_) + 1
+            ranks = ranks[:best_n_blocks]
+        self.ranks = ranks
+        if self.verbose:
+            print(f"Selected model with ranks {self.ranks}")
+        super().fit(X, y, X_test=X_test, y_test=y_test)
+        return self
+
+    def _eval_fold_rank(self, Xt, err, y, fold, r, train_idc, val_idc):
+        n_samples = len(y)
+        hoda_params = self.hoda_params
+        if hoda_params is None:
+            hoda_params = hoda_params
+        hoda = HODA(**hoda_params)
+        hoda.set_params(rank=r)
+        hoda.fit_backward(err[train_idc], y[train_idc])
+        Xtb = hoda.transform(err)
+        Xtb = tl.reshape(Xtb, (n_samples, -1))
+        Xtb = tl.concatenate([Xt, Xtb], axis=1)
+        clf = self.clf_pipe()
+        clf.fit(Xtb[train_idc], y[train_idc])
+        y_pred = clf.decision_function(Xtb)
+        train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
+        val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
+        return dict(
+            fold=fold,
+            rank=r,
+            hoda=hoda,
+            train_score=train_score,
+            val_score=val_score,
+        )
+
+    @staticmethod
+    def clf_pipe():
+        return make_pipeline(
+            Vectorize(),
+            StandardScaler(),
+            # SelectF(alpha=0.5),
+            LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
+        )
