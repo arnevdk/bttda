@@ -3,6 +3,7 @@ import tensorly as tl
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.feature_selection import f_classif
 from sklearn.preprocessing import FunctionTransformer
+from hoda.backend import std
 
 from hoda.tensorize import vec
 
@@ -11,6 +12,14 @@ try:
 except ImportError:
     pass
 
+class ZScore(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        self.mean_ = tl.mean(X, axis=0)
+        self.std_ = std(X, axis=0)
+        return self
+
+    def transform(self, X,y=None):
+        return (X - self.mean_)/self.std_
 
 class SelectF(BaseEstimator, TransformerMixin):
     def __init__(self, alpha=0.5):
