@@ -1,4 +1,5 @@
 import itertools
+from statsmodels.discrete.discrete_model import Logit
 from sklearn.linear_model import LogisticRegressionCV
 import math
 import pdb
@@ -24,7 +25,7 @@ from hoda.backend import copy, lstsq, pinv
 from hoda.classification import SelectF
 from hoda.cov import KroneckerCovariance, mode_scatter
 from hoda.tensorize import Vectorize, vec
-from hoda.util import center, f_multiway, lstsq_ridge, trunc_eigh
+from hoda.util import center, f_multiway, lstsq_ridge, trunc_eigh, r_squared
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -326,13 +327,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 )
                 self.scatter_w_[k] = scatter_w
                 if self.extra_train_info:
-                    train_info_row.update(
-                        self._extra_train_info_backward(
-                            X,
-                            y,
-                            class_counts,
-                        )
-                    )
+                    Xt = self.transform(X)
+                    train_info_row.update(clf_stats(Xt, y))
                 self.train_info_["backward"].append(train_info_row)
 
             # Exit if converged
@@ -413,7 +409,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 train_info_row["update"] = float(update)
                 train_info_row["shrinkage"] = float(shrink)
                 if self.extra_train_info:
-                    train_info_row.update(self._extra_train_info_forward(X, Xt, y))
+                    Xt = self.transform(X)
+                    X_approx = self.inv_transform(Xt)
+                    train_info_row.update(approx_stats(X,Xt, X_approx,y))
                 self.train_info_["forward"].append(train_info_row)
 
             if converged:
@@ -503,49 +501,42 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def n_params_(self):
         return sum([s.size for s in self.weights_])
 
-    def _extra_train_info_backward(self, X, y, class_counts):
-        Xt = self.transform(X)
-        info = dict()
-        # Objective: multi-way F-score
-        # trace-ratio
-        F_tr = f_multiway(
-            Xt,
-            y,
-            self.classes_,
-            class_counts,
-            method="tr",
-        )
-        info["F_tr"] = float(F_tr)
-        # ratio-trace
-        F_rt = f_multiway(
-            Xt,
-            y,
-            self.classes_,
-            class_counts,
-            method="rt",
-        )
-        info["F_rt"] = float(F_rt)
-        return info
+def clf_stats(Xt,y):
+    n, *shape = Xt.shape
+    p = math.prod(shape)
+    stats = dict()
+    stats["F_tr"] = float(f_multiway(Xt,y, method='tr'))
+    stats["F_rt"] = float(f_multiway(Xt,y, method='rt'))
+    _,y_num=np.unique(y, return_inverse=True)
+    logit = Logit(y_num,tl.to_numpy(Xt.reshape(n,p)))
+    logit_res = logit.fit()
+    stats["log_like"] = logit_res.llf
+    pR2 = logit_res.prsquared
+    stats["pseudo_R2"] = pR2
+    pR2_adj = 1-(1-pR2)*(n-1)/(n-p-1)
+    stats["pseudo_R2_adj"] = pR2_adj
+    stats["aic"] = logit_res.aic
+    stats["bic"] = logit_res.bic
+    return stats
 
-    def _extra_train_info_forward(self, X, Xt, y):
-        X_approx = self.inv_transform(Xt)
-        err = X - X_approx
+def approx_stats(X,Xt, X_approx,y):
+    err = X - X_approx
+    n_samples = X.shape[0]
+    G_flat = tl.to_numpy(
+        Xt.reshape((n_samples, -1), order="F"),
+    )
+    err_flat = tl.to_numpy(err.reshape((n_samples, -1), order="F"))
+    cross_corr = np.corrcoef(G_flat, err_flat, rowvar=False)
+    cross_corr = cross_corr[G_flat.shape[-1] :, : G_flat.shape[-1]].T
+    cross_corr = tl.metrics.regression.MSE(cross_corr, 0)
+    mse = tl.metrics.regression.MSE(X, X_approx)
+    nmse = mse / tl.metrics.regression.MSE(X, 0)
+    stats = dict()
+    stats["mse"] = float(mse)
+    stats["nmse"] = float(nmse)
+    stats["err_cross_corr"] = float(cross_corr)
+    return stats
 
-        n_samples = X.shape[0]
-        G_flat = tl.to_numpy(
-            Xt.reshape((n_samples, -1), order="F"),
-        )
-        err_flat = tl.to_numpy(err.reshape((n_samples, -1), order="F"))
-        cross_corr = np.corrcoef(G_flat, err_flat, rowvar=False)
-        cross_corr = cross_corr[G_flat.shape[-1] :, : G_flat.shape[-1]].T
-        cross_corr = tl.metrics.regression.MSE(cross_corr, 0)
-        mse = tl.metrics.regression.MSE(X, X_approx)
-        nmse = mse / tl.metrics.regression.MSE(X, 0)
-        info = dict()
-        info["mse"] = float(mse)
-        info["nmse"] = float(nmse)
-        info["err_cross_corr"] = float(cross_corr)
-        return info
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
@@ -596,7 +587,10 @@ class BTTDA(BaseEstimator, TransformerMixin):
             train_info_row["block"] = self.n_blocks_
             train_info_row["rank"] = block.rank_
             if self.extra_train_info:
-                train_info_row.update(self._extra_train_info(X, y, class_counts))
+                Xt = self.transform(X)
+                X_approx = self.inv_transform(Xt)
+                train_info_row.update(clf_stats(Xt,y))
+                train_info_row.update(approx_stats(X,Xt, X_approx,y))
             self.train_info_.append(train_info_row)
 
         # Convert train info to list dict
@@ -649,36 +643,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
     @property
     def ranks_(self):
         return tuple([b.rank_ for b in self.blocks_])
-
-    def _extra_train_info(self, X, y, class_counts):
-        Xt = self.transform(X, select=False)
-        X_rec = self.inv_transform(Xt)
-        mse = tl.metrics.regression.MSE(X_rec, X)
-        nmse = mse / tl.metrics.regression.MSE(X, 0)
-        # Objective: multi-way F-score
-        # trace-ratio
-        F_tr = f_multiway(
-            Xt,
-            y,
-            self.classes_,
-            class_counts,
-            method="tr",
-        )
-        # ratio-trace
-        F_rt = f_multiway(
-            Xt,
-            y,
-            self.classes_,
-            class_counts,
-            method="rt",
-        )
-
-        info = dict()
-        info["mse"] = float(mse)
-        info["nmse"] = float(nmse)
-        info["F_tr"] = float(F_tr)
-        info["F_rt"] = float(F_rt)
-        return info
 
     
 
@@ -818,6 +782,7 @@ class GreedyBTTDA(BTTDA):
             )
             rank_grid.append(min(shape))
             rank_grid = sorted(list(set(rank_grid)))
+            #rank_grid = np.arange(min(shape))+1
 
         fold_blocks = []
         fold_err = []
@@ -859,12 +824,13 @@ class GreedyBTTDA(BTTDA):
             for res in results:
                 max_n_features = res['Xt'].shape[-1]
                 if self.select:
-                    #n_feature_grid = list(
-                    #    2 ** np.arange(np.floor(np.log2(max_n_features) + 1), dtype=int)
-                    #)
-                    #n_feature_grid.append(max_n_features)
-                    #n_feature_grid = sorted(list(set(n_feature_grid)))
-                    n_feature_grid = list(range(1,max_n_features+1))
+                    n_feature_grid = list(
+                        2 ** np.arange(np.floor(np.log2(max_n_features) + 1), dtype=int)
+                    )
+                    n_feature_grid.append(max_n_features)
+                    #n_feature_grid += list(np.arange(1,min(self.max_blocks, max_n_features)+1))
+                    n_feature_grid = sorted(list(set(n_feature_grid)))
+                    #n_feature_grid = list(range(1,max_n_features+1))
                 else: 
                     n_feature_grid = [max_n_features]
 
@@ -922,7 +888,10 @@ class GreedyBTTDA(BTTDA):
             print(f"Selected model with ranks {self.ranks}")
         super().fit(X, y)
         # Train select
-        Xt = tl.to_numpy(self.transform(X, select=False))
+        Xt = self.transform(X, select=False)
+        #_, self.weights, self.orth  = tl.tenalg.svd_interface(Xt[train_idc])
+        #Xt = Xt@self.orth.T@tl.diag(1/self.weights)
+        Xt = tl.to_numpy(Xt)
         self.select_ = SelectKBest(k=best_n_features)
         self.select_.fit(Xt, y)
         return self
@@ -940,6 +909,7 @@ class GreedyBTTDA(BTTDA):
         if self.select and select:
             if self.verbose:
                 print(f"Selecting {self.select_.k} features")
+            #Xt = Xt@self.orth.T@tl.diag(1/self.weights)
             Xt = self.select_.transform(tl.to_numpy(Xt))
         return Xt
 
@@ -948,16 +918,19 @@ class GreedyBTTDA(BTTDA):
         hoda_params = self.hoda_params
         if hoda_params is None:
             hoda_params = hoda_params
+        # Find new HODA block and features
         hoda = HODA(**hoda_params)
         hoda.set_params(rank=rank)
         hoda.fit_backward(err[train_idc], y[train_idc])
         Xtb = hoda.transform(err)
+        # Concatenate to features from earlier blocks
         Xtb = tl.reshape(Xtb, (n_samples, -1))
         Xt = tl.concatenate([Xt, Xtb], axis=1)
+        # Uncorrelate features 
+        #_, weights, orth  = tl.tenalg.svd_interface(Xt[train_idc])
+        #Xt = Xt@orth.T@tl.diag(1/weights)
+        # Zscore
         Xt = tl.to_numpy(Xt)
-        zscore = StandardScaler()
-        zscore.fit(Xt[train_idc], y[train_idc])
-        Xt=zscore.transform(Xt)
         res = dict(
             Xt=Xt,
             y=y,
