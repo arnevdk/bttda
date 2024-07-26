@@ -19,7 +19,8 @@ from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
                                      cross_validate, train_test_split)
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
-from tqdm.notebook import tqdm
+#from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 from hoda.backend import copy, lstsq, pinv
 from hoda.classification import SelectF
@@ -508,15 +509,15 @@ def clf_stats(Xt,y):
     stats["F_tr"] = float(f_multiway(Xt,y, method='tr'))
     stats["F_rt"] = float(f_multiway(Xt,y, method='rt'))
     _,y_num=np.unique(y, return_inverse=True)
-    logit = Logit(y_num,tl.to_numpy(Xt.reshape(n,p)))
-    logit_res = logit.fit()
-    stats["log_like"] = logit_res.llf
-    pR2 = logit_res.prsquared
-    stats["pseudo_R2"] = pR2
-    pR2_adj = 1-(1-pR2)*(n-1)/(n-p-1)
-    stats["pseudo_R2_adj"] = pR2_adj
-    stats["aic"] = logit_res.aic
-    stats["bic"] = logit_res.bic
+    #logit = Logit(y_num,tl.to_numpy(Xt.reshape(n,p)))
+    #logit_res = logit.fit()
+    #stats["log_like"] = logit_res.llf
+    #pR2 = logit_res.prsquared
+    #stats["pseudo_R2"] = pR2
+    #pR2_adj = 1-(1-pR2)*(n-1)/(n-p-1)
+    #stats["pseudo_R2_adj"] = pR2_adj
+    #stats["aic"] = logit_res.aic
+    #stats["bic"] = logit_res.bic
     return stats
 
 def approx_stats(X,Xt, X_approx,y):
@@ -647,100 +648,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
     
 
 
-
-# class GreedyBTTDA(BTTDA):
-#    def __init__(
-#        self,
-#        hoda_params=None,
-#        verbose=False,
-#        extra_train_info=False,
-#        max_blocks=16,
-#        cv=None,
-#        rank_grid=None,
-#        truncate=True,
-#        n_jobs=None,
-#    ):
-#        super().__init__(
-#            hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
-#        )
-#        self.max_blocks = max_blocks
-#        self.cv = cv
-#        self.rank_grid = rank_grid
-#        self.truncate = truncate
-#        self.n_jobs = n_jobs
-#
-#    def fit(self, X, y=None):
-#        assert tl.is_tensor(X)
-#        _, *shape = X.shape
-#        # Set some defaults
-#        cv = self.cv
-#        if cv is None:
-#            cv = StratifiedKFold(shuffle=True)
-#        rank_grid = self.rank_grid
-#        if rank_grid is None:
-#            rank_grid = [
-#                int(r)
-#                for r in 2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
-#            ]
-#
-#        # Greedy rank selection
-#        self.ranks = []
-#        self.val_scores_ = []
-#        self.model_select_info_ = []
-#        for b in range(self.max_blocks):
-#            if self.verbose:
-#                print(f"Model selection block {b+1}/{self.max_blocks}...")
-#
-#            param_grid = dict(bttda__ranks=[self.ranks + [r] for r in rank_grid])
-#            clf = self.clf_pipe()
-#            gs = GridSearchCV(
-#                clf,
-#                param_grid,
-#                scoring="roc_auc",
-#                n_jobs=self.n_jobs,
-#                refit=False,
-#                verbose=self.verbose,
-#                cv=cv,
-#            )
-#            gs.fit(X, y)
-#            info = pd.DataFrame(gs.cv_results_)
-#            info["block"] = b
-#            self.model_select_info_.append(info)
-#            self.ranks = gs.best_params_["bttda__ranks"]
-#            if self.verbose:
-#                print(f"Selecting ranks {self.ranks}")
-#            self.val_scores_.append(gs.best_score_)
-#
-#        self.model_select_info_ = pd.concat(self.model_select_info_)
-#        if self.truncate:
-#            best_n_blocks = np.argmax(self.val_scores_) + 1
-#            self.ranks = self.ranks[:best_n_blocks]
-#        super().fit(X, y)
-#        return self
-#
-#    def clf_pipe(self):
-#        bttda_params = dict(
-#            hoda_params=self.hoda_params,
-#            extra_train_info=False,
-#            verbose=self.verbose,
-#        )
-#        pipe = Pipeline(
-#            [
-#                ("bttda", BTTDA(**bttda_params)),
-#                ("clf", self.clf()),
-#            ]
-#        )
-#        return pipe
-#
-#    @staticmethod
-#    def clf():
-#        return make_pipeline(
-#            Vectorize(),
-#            StandardScaler(),
-#            LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr"),
-#        )
-
-
 class GreedyBTTDA(BTTDA):
     def __init__(
         self,
@@ -768,6 +675,19 @@ class GreedyBTTDA(BTTDA):
             hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
         )
 
+    def log_rank_grid(self,shape):
+        order = len(shape)
+        grid = []
+        max_r = int(np.floor(np.log2(min(shape)) + 1))
+        for r in range(max_r+1):
+            rank = [2**r]*order
+            for k in range(order):
+                rank[k] = min(rank[k], shape[k])
+            grid.append(tuple(rank))
+        grid = sorted(list(set(grid)))
+        return grid
+
+
     def fit(self, X, y, test=False):
         assert tl.is_tensor(X)
         n_samples, *shape = X.shape
@@ -775,14 +695,8 @@ class GreedyBTTDA(BTTDA):
         cv = self.cv
         if cv is None:
             cv = StratifiedKFold(shuffle=True)
-        rank_grid = self.rank_grid
-        if rank_grid is None:
-            rank_grid = list(
-                2 ** np.arange(np.floor(np.log2(min(shape)) + 1), dtype=int)
-            )
-            rank_grid.append(min(shape))
-            rank_grid = sorted(list(set(rank_grid)))
-            #rank_grid = np.arange(min(shape))+1
+        rank_grid = self.rank_grid or self.log_rank_grid(shape)
+        print(rank_grid)
 
         fold_blocks = []
         fold_err = []
@@ -846,6 +760,7 @@ class GreedyBTTDA(BTTDA):
             df = df.groupby(["rank", "n_features"])["val_score"].aggregate("mean")
             best_rank, best_n_features = df.idxmax()
             ranks.append(best_rank)
+            print(f"rank={best_rank}  n_features={best_n_features}")
             # Retrieve matching fold models
             df = pd.DataFrame(results)
             df = df.set_index(["rank", "n_features", "fold"])
@@ -946,10 +861,10 @@ class GreedyBTTDA(BTTDA):
 
     def _eval_n_features(self, Xt=None,y=None,b=None,fold=None,rank=None,n_features=None,hoda=None,train_idc=None,val_idc=None, test_idc=None):
             select = SelectKBest(k=n_features)
+            #select = SelectF(alpha=.05)
             select.fit(Xt[train_idc], y[train_idc])
             Xt_sel = select.transform(Xt)
             clf = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
-            #clf = LogisticRegressionCV(penalty='l1', solver='saga', max_iter=1000)
             clf.fit(Xt_sel[train_idc], y[train_idc])
             y_pred = clf.decision_function(Xt_sel)
             train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
@@ -958,7 +873,7 @@ class GreedyBTTDA(BTTDA):
                     block=b,
                     fold=fold,
                     rank=rank,
-                    n_features=n_features,
+                    n_features=Xt_sel.shape[-1],
                     hoda=hoda,
                     train_score=train_score,
                     val_score=val_score,
