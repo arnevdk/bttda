@@ -36,7 +36,7 @@ def stf_tensor(
     y=None,
     morlet_params=None,
     bin_freq=25,
-    zscore=False,
+    zscore=True,
 ):
     # TFR
     if morlet_params is None:
