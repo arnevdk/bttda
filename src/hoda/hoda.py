@@ -811,10 +811,13 @@ class GreedyBTTDA(BTTDA):
     def transform(self, X, select=True, **kwargs):
         Xt = super().transform(X, **kwargs)
         if self.select and select:
-            if self.verbose:
-                print(f"Selecting {self.select_.k} features")
-            # Xt = Xt@self.orth.T@tl.diag(1/self.weights)
-            Xt = self.select_.transform(Xt)
+           # Xt = Xt@self.orth.T@tl.diag(1/self.weights)
+           n_before = Xt.shape[-1]
+           Xt = self.select_.transform(Xt)
+           n_after = Xt.shape[-1]
+           if self.verbose:
+               print(f"Selected {n_after}/{n_before} features")
+ 
         return Xt
 
     def _eval_ranks(
