@@ -351,10 +351,21 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         if Xt is None:
             Xt = self.transform(X)
-        if Xt_centered is None:
-            _, Xt_centered = center(Xt, y)
-        if X_centered is None:
-            _, X_centered = center(X, y)
+        # if Xt_centered is None:
+        #    _, Xt_centered = center(Xt, y)
+        # if X_centered is None:
+        #    _, X_centered = center(X, y)
+
+        # Apply class balance weights
+        classes, class_counts = np.unique(y, return_counts=True)
+        weights = tl.zeros(n_samples)
+        for c, cls in enumerate(classes):
+            weights[y == cls] = 1 / class_counts[c]
+        weights /= tl.mean(weights)
+        modes = tuple([k + 1 for k in range(order)])
+        weights = np.expand_dims(weights, axis=modes)
+        X = weights * X
+        Xt = weights * Xt
 
         # Initialize
         self.aps_ = [copy(w) for w in self.weights_]
@@ -372,35 +383,33 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 # Initialize or calculate activation pattern
                 if not i:
                     ap = copy(self.weights_[k])
+                    # ap = tl.eye(shape[k])[:, : self.rank_[k]]
                     update = np.inf
                     shrink = np.nan
                 else:
                     modes = range(1, order + 1)
-                    G = tl.tenalg.multi_mode_dot(
-                        Xt_centered, self.aps_, modes=modes, skip=k
-                    )
-
+                    G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
                     # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
                     # cov_cross = tl.tensordot(X_centered, G, axes=(modes, modes))
                     # cov_g, shrink = mode_scatter(
                     #    G,
                     #    k,
-                    #    # shrinkage=self.shrinkage,
-                    #    shrinkage=0,
+                    #    shrinkage=self.shrinkage,
+                    #    # shrinkage=0,
                     #    assume_centered=True,
                     # )
                     # ap = tl.solve(cov_g.T, cov_cross.T).T
 
                     Gk = tl.unfold(G, k + 1)
-                    Xk = tl.unfold(X_centered, k + 1)
-                    ap, *_ = lstsq(Gk.T, Xk.T)
+                    Xk = tl.unfold(X, k + 1)
+                    ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
+
                     # ap = lstsq_ridge(Gk.T, Xk.T, lambda_=10)
                     ap = ap.T
                     shrink = 0
 
                     update = tl.norm(ap - self.aps_[k])
                     update /= tl.norm(self.aps_[k])
-
                 self.aps_[k] = ap
                 converged = update < self.tol and converged
 
@@ -415,6 +424,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     X_approx = self.inv_transform(Xt)
                     train_info_row.update(forward_stats(X, Xt, X_approx, y))
                 self.train_info_["forward"].append(train_info_row)
+
             if converged:
                 break
 
@@ -794,7 +804,6 @@ class GreedyBTTDA(BTTDA):
         Xt = self.transform(X, select=False)
         # _, self.weights, self.orth  = tl.tenalg.svd_interface(Xt[train_idc])
         # Xt = Xt@self.orth.T@tl.diag(1/self.weights)
-        Xt = tl.to_numpy(Xt)
         if self.select:
             self.select_ = SelectF(alpha=0.05)
             self.select_.fit(Xt, y)
