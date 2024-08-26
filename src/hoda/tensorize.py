@@ -35,14 +35,16 @@ def stf_tensor(
     sfreq=None,
     y=None,
     morlet_params=None,
-    bin_freq=25,
+    #bin_freq=25,
+    bin_freq=16,
+    n_freqs = 16,
     zscore=True,
 ):
     # TFR
     if morlet_params is None:
         morlet_params = dict()
-    morlet_params["output"] = "complex"
-    morlet_params.setdefault("freqs", np.geomspace(8, 32, 23))
+    morlet_params["output"] = "power"
+    morlet_params.setdefault("freqs", np.geomspace(8, 32, n_freqs))
     morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
     Xt = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
 

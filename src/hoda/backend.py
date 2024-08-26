@@ -23,6 +23,8 @@ import tensorly as tl
 
 
 def pinv(*args, **kwargs):
+    if tl.get_backend() == "numpy":
+        return np.linalg.pinv(*args, **kwargs)
     if tl.get_backend() == "cupy":
         return cupy.linalg.pinv(*args, **kwargs)
     else:

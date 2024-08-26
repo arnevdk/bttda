@@ -216,6 +216,8 @@ def f_oneway(X, y, classes=None, class_counts=None):
     return F, p
 
 def lstsq_ridge(X, y, lambda_=1):
-    A = lambda_ * tl.eye(X.shape[1])
-    pseudo_inverse = pinv(X.T @ X + A) @ X.T
+    I =  tl.eye(X.shape[1])
+    XTX = X.T@X
+    n_features = XTX.shape[0]
+    pseudo_inverse = pinv(XTX + lambda_*tl.trace(XTX)*I/n_features) @ X.T
     return pseudo_inverse @ y

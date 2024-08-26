@@ -19,7 +19,7 @@ from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 # from statsmodels.discrete.discrete_model import Logit
-from tqdm.notebook import tqdm
+#from tqdm.notebook import tqdm
 
 from hoda.backend import copy, lstsq, pinv
 from hoda.classification import SelectF
@@ -27,7 +27,7 @@ from hoda.cov import KroneckerCovariance, mode_scatter
 from hoda.tensorize import Vectorize, vec
 from hoda.util import center, f_multiway, lstsq_ridge, r_squared, trunc_eigh
 
-# from tqdm import tqdm
+from tqdm import tqdm
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -357,15 +357,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         #    _, X_centered = center(X, y)
 
         # Apply class balance weights
-        classes, class_counts = np.unique(y, return_counts=True)
-        weights = tl.zeros(n_samples)
-        for c, cls in enumerate(classes):
-            weights[y == cls] = 1 / class_counts[c]
-        weights /= tl.mean(weights)
-        modes = tuple([k + 1 for k in range(order)])
-        weights = np.expand_dims(weights, axis=modes)
-        X = weights * X
-        Xt = weights * Xt
+        #classes, class_counts = np.unique(y, return_counts=True)
+        #weights = tl.zeros(n_samples)
+        #for c, cls in enumerate(classes):
+        #    weights[y == cls] = 1 / class_counts[c]
+        #weights = tl.sqrt(weights)
+        #modes = tuple([k + 1 for k in range(order)])
+        #weights = np.expand_dims(weights, axis=modes)
+        #X = weights * X
+        #Xt = weights * Xt
 
         # Initialize
         self.aps_ = [copy(w) for w in self.weights_]
@@ -389,22 +389,23 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 else:
                     modes = range(1, order + 1)
                     G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
-                    # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    # cov_cross = tl.tensordot(X_centered, G, axes=(modes, modes))
-                    # cov_g, shrink = mode_scatter(
-                    #    G,
-                    #    k,
-                    #    shrinkage=self.shrinkage,
-                    #    # shrinkage=0,
-                    #    assume_centered=True,
-                    # )
-                    # ap = tl.solve(cov_g.T, cov_cross.T).T
+
+                    #modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    #cov_cross = tl.tensordot(X, G, axes=(modes, modes))
+                    #pdb.set_trace()
+                    #cov_g, shrink = mode_scatter(
+                    #        G, k,
+                    #        shrinkage=self.shrinkage,
+                    #        toeplitz=self.toeplitz,
+                    #        assume_centered=True,
+                    #)
+                    #ap = tl.solve(cov_g.T, cov_cross.T).T
+
 
                     Gk = tl.unfold(G, k + 1)
                     Xk = tl.unfold(X, k + 1)
                     ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
-
-                    # ap = lstsq_ridge(Gk.T, Xk.T, lambda_=10)
+                    #ap = lstsq_ridge(Gk.T, Xk.T, lambda_=0)
                     ap = ap.T
                     shrink = 0
 
@@ -543,10 +544,10 @@ def forward_stats(X, Xt, X_approx, y):
     # cross_corr = cross_corr[G_flat.shape[-1] :, : G_flat.shape[-1]].T
     # cross_corr = tl.metrics.regression.MSE(cross_corr, 0)
     mse = tl.metrics.regression.MSE(X, X_approx)
-    # nmse = mse / tl.metrics.regression.MSE(X, 0)
+    nmse = mse / tl.metrics.regression.MSE(X, 0)
     stats = dict()
     stats["mse"] = float(mse)
-    # stats["nmse"] = float(nmse)
+    stats["nmse"] = float(nmse)
     # stats["err_cross_corr"] = float(cross_corr)
     return stats
 
@@ -599,7 +600,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             train_info_row["block"] = self.n_blocks_
             train_info_row["rank"] = block.rank_
             if self.extra_train_info:
-                Xt = self.transform(X)
+                Xt = self.transform(X, select=False)
                 X_approx = self.inv_transform(Xt)
                 train_info_row.update(backward_stats(Xt, y))
                 train_info_row.update(forward_stats(X, Xt, X_approx, y))
@@ -619,7 +620,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
     def n_params_(self):
         return sum([b.n_params_ for b in self.blocks_])
 
-    def transform(self, X, y=None, blocks=None, return_err=False):
+    def transform(self, X, y=None, blocks=None, return_err=False,**_):
         assert tl.is_tensor(X)
         err = copy(X)
         n_samples, *_ = X.shape
@@ -687,12 +688,13 @@ class GreedyBTTDA(BTTDA):
     def log_rank_grid(self, shape):
         order = len(shape)
         grid = []
-        max_r = int(np.floor(np.log2(min(shape)) + 1))
+        max_r = int(np.floor(np.log2(max(shape)) + 1))
         for r in range(max_r):
             rank = [2**r] * order
             for k in range(order):
                 rank[k] = min(rank[k], shape[k])
             grid.append(tuple(rank))
+        grid.append(tuple(shape))
         grid = sorted(list(set(grid)))
         return grid
 
@@ -864,9 +866,15 @@ class GreedyBTTDA(BTTDA):
         # Classify
         clf = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
         clf.fit(Xt_sel[train_idc], y[train_idc])
-        y_pred = clf.decision_function(Xt_sel)
-        train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
-        val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
+        n_classes = np.unique(y)
+        if len(n_classes) >2:
+            multi_class = 'ovr'
+            y_pred = clf.predict_proba(Xt_sel)
+        else:
+            multi_class = 'raise'
+            y_pred = clf.decision_function(Xt_sel)
+        train_score = roc_auc_score(y[train_idc], y_pred[train_idc], multi_class=multi_class)
+        val_score = roc_auc_score(y[val_idc], y_pred[val_idc], multi_class=multi_class)
         res = dict(
             block=b,
             fold=fold,
@@ -878,7 +886,7 @@ class GreedyBTTDA(BTTDA):
             val_score=val_score,
         )
         if test_idc is not None:
-            test_score = roc_auc_score(y[test_idc], y_pred[test_idc])
+            test_score = roc_auc_score(y[test_idc], y_pred[test_idc], multi_class=multi_class)
             res["test_score"] = test_score
         return res
 
