@@ -1,4 +1,5 @@
 import numpy as np
+import math
 import tensorly as tl
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
@@ -28,6 +29,7 @@ class SelectF(BaseEstimator, TransformerMixin):
         self.alpha = alpha
 
     def fit(self, X, y=None):
+        n_samples, *shape = X.shape
         self.F_, self.p_ = f_oneway(X, y)
         self.mask_ = self.p_ < self.alpha
         if not np.any(self.mask_):
