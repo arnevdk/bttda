@@ -1,0 +1,16 @@
+services:
+  hoda-bci:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: ${TARGET}
+    volumes:
+      - ./src:/project/src:Z
+      - ./tests:/project/tests:Z
+      - ./tests:/project/notebooks:Z
+      - $HOME/mne_data:/root/mne_data:Z
+      - $HOME/.jupyter:/root/.jupyter:Z
+      - $HOME/.ipython:/root/.ipython:Z
+    ports:
+      - "8888:8888"
+    entrypoint: "jupyter notebook --ip 0.0.0.0 --port 8888 --allow-root --no-browser"

@@ -11,7 +11,8 @@ setup(
     extras_require={
         "experiments": [
             "mne<=1.6.1",
-            "moabb==1.0.0",
+            "pyyaml<5.4",
+            "moabb",
             "matplotlib<3.9",
             "jupyter",
             "seaborn",
