@@ -1,16 +1,21 @@
 services:
   hoda-bci:
+    image: localhost/hoda-bci:${TENSORLY_BACKEND:-numpy}
     build:
       context: .
       dockerfile: Containerfile
-      target: ${TARGET}
+      target: ${TENSORLY_BACKEND:-numpy}
     volumes:
       - ./src:/project/src:Z
       - ./tests:/project/tests:Z
-      - ./tests:/project/notebooks:Z
+      - ./notebooks:/project/notebooks:Z
       - $HOME/mne_data:/root/mne_data:Z
       - $HOME/.jupyter:/root/.jupyter:Z
       - $HOME/.ipython:/root/.ipython:Z
     ports:
       - "8888:8888"
-    entrypoint: "jupyter notebook --ip 0.0.0.0 --port 8888 --allow-root --no-browser"
+    entrypoint: "jupyter notebook --ip 0.0.0.0 --port 8888 --allow-root --no-browser --NotebookApp.token=abcd"
+    security_opt:
+      - "label=disable"
+    devices:
+      - "nvidia.com/gpu=all"

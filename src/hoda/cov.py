@@ -1,4 +1,5 @@
 # import numpy as np
+import pdb
 import math
 import warnings
 
@@ -22,7 +23,7 @@ def mode_scatter(
     """Calculate the scatter matrix along a given tensor mode"""
     global eyes
 
-    _, *shape = X.shape
+    n_samples, *shape = X.shape
     order = len(shape)
     n_features = shape[k]
     if weights is not None:
@@ -40,10 +41,15 @@ def mode_scatter(
     # Determine shrinkage
     if shrinkage == "lw":
         Xf = tl.unfold(X, k + 1)
-        shrinkage = ledoit_wolf_shrinkage(Xf.T, assume_centered=assume_centered)
+        shrinkage = ledoit_wolf_shrinkage(Xf.T,
+                                          assume_centered=assume_centered,
+                                          n_iid_samples=n_samples
+                                          )
     elif shrinkage == "oas":
         Xf = tl.unfold(X, k + 1)
-        shrinkage = oas(Xf.T, assume_centered=assume_centered, emp_cov=scatter)
+        shrinkage = oas(Xf.T, assume_centered=assume_centered, emp_cov=scatter,
+                        n_iid_samples=n_samples
+                        )
     elif shrinkage == "ell1":
         raise NotImplementedError
     elif shrinkage == "ell2":
@@ -75,8 +81,8 @@ def force_toeplitz(A, taper=False):
         toep = toep * taper
     return toeplitz(toep)
 
-
-def ledoit_wolf_shrinkage(X, assume_centered=False, block_size=1000):
+def ledoit_wolf_shrinkage(X, assume_centered=False, block_size=1000,
+                          n_iid_samples=None):
     """Estimate the shrunk Ledoit-Wolf covariance matrix.
     Read more in the :ref:`User Guide <shrunk_covariance>`.
     Parameters
@@ -144,11 +150,14 @@ def ledoit_wolf_shrinkage(X, assume_centered=False, block_size=1000):
     delta_ += tl.sum(
         tl.dot(X.T[block_size * n_splits :], X[:, block_size * n_splits :]) ** 2
     )
+
     delta_ /= n_samples**2
     beta_ += tl.sum(
         tl.dot(X2.T[block_size * n_splits :], X2[:, block_size * n_splits :])
     )
     # use delta_ to compute beta
+
+
     beta = 1.0 / (n_features * n_samples) * (beta_ / n_samples - delta_)
     # delta is the sum of the squared coefficients of (<X.T,X> - mu*Id) / p
     delta = delta_ - 2.0 * mu * emp_cov_trace.sum() + n_features * mu**2
@@ -163,7 +172,7 @@ def ledoit_wolf_shrinkage(X, assume_centered=False, block_size=1000):
     return shrinkage
 
 
-def oas(X, emp_cov=None, assume_centered=False):
+def oas(X, emp_cov=None, assume_centered=False, n_iid_samples=None):
     """Estimate covariance with the Oracle Approximating Shrinkage algorithm.
 
     The formulation is based on [1]_.
@@ -172,16 +181,15 @@ def oas(X, emp_cov=None, assume_centered=False):
         IEEE Transactions on Signal Processing, 58(10), 5016-5029, 2010.
         https://arxiv.org/pdf/0907.4698.pdf
     """
-    if len(X.shape) == 2 and X.shape[1] == 1:
-        # for only one feature, the result is the same whatever the shrinkage
-        if not assume_centered:
-            X = X - X.mean()
-        return np.atleast_2d((X**2).mean()), 0.0
-
     n_samples, n_features = X.shape
+    if not assume_centered:
+        X = X-tl.mean(X, axis=0)
 
     if emp_cov is None:
         emp_cov = X.T @ X / (n_samples - 1)
+
+    if n_features==1:
+        return 0
 
     # The shrinkage is defined as:
     # shrinkage = min(
@@ -198,14 +206,16 @@ def oas(X, emp_cov=None, assume_centered=False):
     alpha = tl.mean(emp_cov**2)
     mu = tl.trace(emp_cov) / n_features
     mu_squared = mu**2
+    
+    if n_iid_samples is not None:
+        n_samples=n_iid_samples
 
     # The factor 1 / p**2 will cancel out since it is in both the numerator and
     # denominator
     num = alpha + mu_squared
     den = (n_samples + 1) * (alpha - mu_squared / n_features)
     # shrinkage = 1.0 if den == 0 else min(num / den, 1.0)
-    shrinkage = num / den
-
+    shrinkage = num / den   
     return shrinkage
 
 

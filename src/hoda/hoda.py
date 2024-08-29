@@ -1,4 +1,6 @@
 import itertools
+from sklearn.metrics import log_loss
+from hoda.backend import std
 from sklearn.base import clone
 import math
 import pdb
@@ -173,7 +175,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return self
 
     def fit_backward(
-        self, X, y, X_centered=None, means=None, classes=None, class_counts=None
+        self, X, y, X_centered=None, means=None, classes=None,
+        class_counts=None, sample_weights=None
     ):
         assert tl.is_tensor(X)
         # TODO: calculate train info for initialization
@@ -221,9 +224,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 shrinkage=self.shrinkage,
                 toeplitz=self.toeplitz,
                 taper=self.taper,
+                weights=tl.sqrt(sample_weights) if sample_weights is not None else None
             )
             scatter_b, _ = mode_scatter(
-                self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
+                self.means_, k,
+                weights=tl.sqrt(class_counts), shrinkage=0
             )
             scatter_t[k] = scatter_w + scatter_b
 
@@ -391,27 +396,29 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     modes = range(1, order + 1)
                     G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
 
-                    #modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    #cov_cross = tl.tensordot(X, G, axes=(modes, modes))
-                    #pdb.set_trace()
-                    #cov_g, shrink = mode_scatter(
-                    #        G, k,
-                    #        shrinkage=self.shrinkage,
-                    #        toeplitz=self.toeplitz,
-                    #        assume_centered=True,
-                    #)
-                    #ap = tl.solve(cov_g.T, cov_cross.T).T
+                    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    cov_cross = tl.tensordot(X, G, axes=(modes, modes))
+                    cov_g, shrink = mode_scatter(
+                            G, k,
+                            shrinkage=self.shrinkage,
+                            toeplitz=self.toeplitz,
+                            assume_centered=True,
+                    )
+                    ap = tl.solve(cov_g.T, cov_cross.T).T
 
 
-                    Gk = tl.unfold(G, k + 1)
-                    Xk = tl.unfold(X, k + 1)
-                    ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
-                    #ap = lstsq_ridge(Gk.T, Xk.T, lambda_=0)
-                    ap = ap.T
-                    shrink = 0
+                    #Gk = tl.unfold(G, k + 1)
+                    #Xk = tl.unfold(X, k + 1)
+                    #ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
+                    ##ap = lstsq_ridge(Gk.T, Xk.T, lambda_=2)
+                    #ap = ap.T
+                    #shrink = 0
 
                     update = tl.norm(ap - self.aps_[k])
                     update /= tl.norm(self.aps_[k])
+
+                #if k < order-1:
+                #    ap *= tl.sign(ap[0,0])
                 self.aps_[k] = ap
                 converged = update < self.tol and converged
 
@@ -521,7 +528,13 @@ def backward_stats(Xt, y):
     stats = dict()
     stats["F_tr"] = float(f_multiway(Xt, y, method="tr"))
     stats["F_rt"] = float(f_multiway(Xt, y, method="rt"))
-    _, y_num = np.unique(y, return_inverse=True)
+
+    lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
+    Xtf = tl.to_numpy(Xt.reshape((len(Xt),-1)))
+    lda.fit(Xtf,y)
+    y_pred = lda.predict_proba(Xtf)
+    stats['log_loss'] = float(log_loss(y,y_pred))
+    #_, y_num = np.unique(y, return_inverse=True)
     # logit = Logit(y_num,tl.to_numpy(Xt.reshape(n,p)))
     # logit_res = logit.fit()
     # stats["log_like"] = logit_res.llf
@@ -582,6 +595,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.train_info_ = []
 
         err = copy(X)
+        #weight = tl.ones(len(X))
         for b, rank in enumerate(self.ranks):
             if blocks is not None and b < len(blocks):
                 # TODO error if ranks are not equal
@@ -592,7 +606,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 hoda_params["rank"] = rank
                 block = HODA(**hoda_params)
                 block.fit_backward(
-                    err, y, classes=self.classes_, class_counts=class_counts
+                    err, y, classes=self.classes_, class_counts=class_counts,
+                    #sample_weights=weight,
                 )
             self.blocks_.append(block)
             G = block.transform(err)
@@ -604,8 +619,10 @@ class BTTDA(BaseEstimator, TransformerMixin):
             train_info_row = dict()
             train_info_row["block"] = self.n_blocks_
             train_info_row["rank"] = block.rank_
+
+            Xt = self.transform(X)
+            #weight = self.calc_weight(Xt,y)
             if self.extra_train_info:
-                Xt = self.transform(X)
                 if b < len(self.ranks)-1 or self.forward:
                     X_approx = self.inv_transform(Xt)
                 else:
@@ -619,6 +636,55 @@ class BTTDA(BaseEstimator, TransformerMixin):
             k: [dic[k] for dic in self.train_info_] for k in self.train_info_[0]
         }
         return self
+
+    def calc_weight(self,X,y):
+        #X =tl.copy(X)
+        #for cls in np.unique(y):
+        #    X[y==cls] -= np.mean(X[y==cls], axis=0)
+        #X /= std(X, axis=0)
+        #dist = tl.norm(X, axis=1)
+        #weights = dist/tl.mean(dist)
+        #return weights
+
+        #X = tl.copy(X)
+        #X /= std(X, axis=0)
+        #mean_of_means = 0
+        #classes = np.unique(y)
+        #for cls in classes:
+        #     mean_of_means += tl.mean(X[y==cls], axis=0)/len(classes)
+        #dist = 1/tl.norm(X-mean_of_means, axis=1)
+        #weight = dist/tl.mean(dist)
+        #print(weight)
+        #return weight
+
+        #lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
+        #X = tl.to_numpy(X)
+        #lda.fit(X,y)
+        #weights = lda.decision_function(X) - lda.intercept_
+        #weights = tl.tensor(weights)
+        #weights = tl.sqrt(1/tl.abs(weights))
+        #weights /= tl.mean(weights)
+        #print(weights)
+        #return weights
+
+        lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
+        X = tl.to_numpy(X)
+        lda.fit(X,y)
+        y_pred = lda.predict_proba(X)
+        weights = tl.zeros(len(X))
+        #for c,cls in enumerate(np.unique(y)):
+        #    weights[y==cls] = prob[y==cls,c]
+        #weights = tl.tensor(weights)
+        #weights = 1-weights
+        #weights /= tl.mean(weights)
+        labels = np.unique(y)
+        for i in range(len(X)):
+            weights[i] = log_loss(y[[i]], y_pred[[i]], labels=labels)         
+        weights/=tl.mean(weights)
+        print(weights)
+        return weights
+
+
 
     @property
     def n_blocks_(self):
@@ -715,14 +781,15 @@ class GreedyBTTDA(BTTDA):
         if cv is None:
             cv = StratifiedKFold(shuffle=True)
         rank_grid = self.rank_grid
-        if rank_grid is not None:
-            rank_grid = self.rank_grid or self.log_rank_grid(shape)
+        if rank_grid is None:
+            rank_grid = self.log_rank_grid(shape)
         self.model_select_info_ = []
 
         # Create cross validation splits
         all_idc = np.arange(len(X))
         if test:
-            idc, test_idc, _, _ = train_test_split(all_idc, y, test_size=0.2)
+            idc, test_idc, _, _ = train_test_split(all_idc, y, test_size=0.2,
+                                                   shuffle=True, random_state=42)
             splits = list(cv.split(idc, y[idc]))
             for f, (train_idc, val_idc) in enumerate(splits):
                 splits[f] = (idc[train_idc], idc[val_idc], test_idc)
@@ -731,7 +798,6 @@ class GreedyBTTDA(BTTDA):
             for f, (train_idc, val_idc) in enumerate(splits):
                 splits[f] = (train_idc, val_idc, None)
 
-        
         # Instantiate cross validation models
         fold_bttda = []
         hoda_params = self.hoda_params
@@ -753,7 +819,6 @@ class GreedyBTTDA(BTTDA):
                 print()
 
             # Evaluate different ranks
-            rank_grid = self.log_rank_grid(shape)
             val_scores = np.zeros((len(splits), len(rank_grid)))
             for ri,r in enumerate(rank_grid):
                 if self.verbose:
