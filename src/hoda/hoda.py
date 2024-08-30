@@ -1,7 +1,4 @@
 import itertools
-from sklearn.metrics import log_loss
-from hoda.backend import std
-from sklearn.base import clone
 import math
 import pdb
 
@@ -11,7 +8,8 @@ import tensorly as tl
 import tensorly.decomposition
 import tensorly.tenalg
 from joblib import Parallel, delayed
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
+from sklearn.base import (BaseEstimator, ClassifierMixin, TransformerMixin,
+                          clone)
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import SelectKBest
 from sklearn.linear_model import (ElasticNet, LogisticRegression,
@@ -21,16 +19,16 @@ from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
                                      cross_validate, train_test_split)
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
-# from statsmodels.discrete.discrete_model import Logit
-#from tqdm.notebook import tqdm
+from tqdm import tqdm
 
-from hoda.backend import copy, lstsq, pinv
+from hoda.backend import copy, lstsq, pinv, std
 from hoda.classification import SelectF
 from hoda.cov import KroneckerCovariance, mode_scatter
 from hoda.tensorize import Vectorize, vec
 from hoda.util import center, f_multiway, lstsq_ridge, r_squared, trunc_eigh
 
-from tqdm import tqdm
+# from statsmodels.discrete.discrete_model import Logit
+# from tqdm.notebook import tqdm
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -175,8 +173,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return self
 
     def fit_backward(
-        self, X, y, X_centered=None, means=None, classes=None,
-        class_counts=None, sample_weights=None
+        self,
+        X,
+        y,
+        X_centered=None,
+        means=None,
+        classes=None,
+        class_counts=None,
+        sample_weights=None,
     ):
         assert tl.is_tensor(X)
         # TODO: calculate train info for initialization
@@ -224,11 +228,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 shrinkage=self.shrinkage,
                 toeplitz=self.toeplitz,
                 taper=self.taper,
-                weights=tl.sqrt(sample_weights) if sample_weights is not None else None
+                weights=tl.sqrt(sample_weights) if sample_weights is not None else None,
             )
             scatter_b, _ = mode_scatter(
-                self.means_, k,
-                weights=tl.sqrt(class_counts), shrinkage=0
+                self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
             )
             scatter_t[k] = scatter_w + scatter_b
 
@@ -363,15 +366,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         #    _, X_centered = center(X, y)
 
         # Apply class balance weights
-        #classes, class_counts = np.unique(y, return_counts=True)
-        #weights = tl.zeros(n_samples)
-        #for c, cls in enumerate(classes):
+        # classes, class_counts = np.unique(y, return_counts=True)
+        # weights = tl.zeros(n_samples)
+        # for c, cls in enumerate(classes):
         #    weights[y == cls] = 1 / class_counts[c]
-        #weights = tl.sqrt(weights)
-        #modes = tuple([k + 1 for k in range(order)])
-        #weights = np.expand_dims(weights, axis=modes)
-        #X = weights * X
-        #Xt = weights * Xt
+        # weights = tl.sqrt(weights)
+        # modes = tuple([k + 1 for k in range(order)])
+        # weights = np.expand_dims(weights, axis=modes)
+        # X = weights * X
+        # Xt = weights * Xt
 
         # Initialize
         self.aps_ = [copy(w) for w in self.weights_]
@@ -399,25 +402,25 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
                     cov_cross = tl.tensordot(X, G, axes=(modes, modes))
                     cov_g, shrink = mode_scatter(
-                            G, k,
-                            shrinkage=self.shrinkage,
-                            toeplitz=self.toeplitz,
-                            assume_centered=True,
+                        G,
+                        k,
+                        shrinkage=self.shrinkage,
+                        toeplitz=self.toeplitz,
+                        assume_centered=True,
                     )
                     ap = tl.solve(cov_g.T, cov_cross.T).T
 
-
-                    #Gk = tl.unfold(G, k + 1)
-                    #Xk = tl.unfold(X, k + 1)
-                    #ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X, k + 1)
+                    # ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
                     ##ap = lstsq_ridge(Gk.T, Xk.T, lambda_=2)
-                    #ap = ap.T
-                    #shrink = 0
+                    # ap = ap.T
+                    # shrink = 0
 
                     update = tl.norm(ap - self.aps_[k])
                     update /= tl.norm(self.aps_[k])
 
-                #if k < order-1:
+                # if k < order-1:
                 #    ap *= tl.sign(ap[0,0])
                 self.aps_[k] = ap
                 converged = update < self.tol and converged
@@ -529,12 +532,12 @@ def backward_stats(Xt, y):
     stats["F_tr"] = float(f_multiway(Xt, y, method="tr"))
     stats["F_rt"] = float(f_multiway(Xt, y, method="rt"))
 
-    lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
-    Xtf = tl.to_numpy(Xt.reshape((len(Xt),-1)))
-    lda.fit(Xtf,y)
+    lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
+    Xtf = tl.to_numpy(Xt.reshape((len(Xt), -1)))
+    lda.fit(Xtf, y)
     y_pred = lda.predict_proba(Xtf)
-    stats['log_loss'] = float(log_loss(y,y_pred))
-    #_, y_num = np.unique(y, return_inverse=True)
+    stats["log_loss"] = float(log_loss(y, y_pred))
+    # _, y_num = np.unique(y, return_inverse=True)
     # logit = Logit(y_num,tl.to_numpy(Xt.reshape(n,p)))
     # logit_res = logit.fit()
     # stats["log_like"] = logit_res.llf
@@ -579,7 +582,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.ranks = ranks
         self.verbose = verbose
         self.extra_train_info = extra_train_info
-        self.forward=forward
+        self.forward = forward
 
     def fit(self, X, y=None, blocks=None):
         assert tl.is_tensor(X)
@@ -595,7 +598,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.train_info_ = []
 
         err = copy(X)
-        #weight = tl.ones(len(X))
+        # weight = tl.ones(len(X))
         for b, rank in enumerate(self.ranks):
             if blocks is not None and b < len(blocks):
                 # TODO error if ranks are not equal
@@ -606,13 +609,16 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 hoda_params["rank"] = rank
                 block = HODA(**hoda_params)
                 block.fit_backward(
-                    err, y, classes=self.classes_, class_counts=class_counts,
-                    #sample_weights=weight,
+                    err,
+                    y,
+                    classes=self.classes_,
+                    class_counts=class_counts,
+                    # sample_weights=weight,
                 )
             self.blocks_.append(block)
             G = block.transform(err)
-            if b < len(self.ranks)-1 or self.forward:
-                if not hasattr(block,'aps_'):
+            if b < len(self.ranks) - 1 or self.forward:
+                if not hasattr(block, "aps_"):
                     block.fit_forward(err, y, Xt=G)
                 err -= block.inv_transform(G)
             # Calculate train info
@@ -621,9 +627,9 @@ class BTTDA(BaseEstimator, TransformerMixin):
             train_info_row["rank"] = block.rank_
 
             Xt = self.transform(X)
-            #weight = self.calc_weight(Xt,y)
+            # weight = self.calc_weight(Xt,y)
             if self.extra_train_info:
-                if b < len(self.ranks)-1 or self.forward:
+                if b < len(self.ranks) - 1 or self.forward:
                     X_approx = self.inv_transform(Xt)
                 else:
                     X_approx = np.zeros_like(X)
@@ -637,54 +643,52 @@ class BTTDA(BaseEstimator, TransformerMixin):
         }
         return self
 
-    def calc_weight(self,X,y):
-        #X =tl.copy(X)
-        #for cls in np.unique(y):
+    def calc_weight(self, X, y):
+        # X =tl.copy(X)
+        # for cls in np.unique(y):
         #    X[y==cls] -= np.mean(X[y==cls], axis=0)
-        #X /= std(X, axis=0)
-        #dist = tl.norm(X, axis=1)
-        #weights = dist/tl.mean(dist)
-        #return weights
+        # X /= std(X, axis=0)
+        # dist = tl.norm(X, axis=1)
+        # weights = dist/tl.mean(dist)
+        # return weights
 
-        #X = tl.copy(X)
-        #X /= std(X, axis=0)
-        #mean_of_means = 0
-        #classes = np.unique(y)
-        #for cls in classes:
+        # X = tl.copy(X)
+        # X /= std(X, axis=0)
+        # mean_of_means = 0
+        # classes = np.unique(y)
+        # for cls in classes:
         #     mean_of_means += tl.mean(X[y==cls], axis=0)/len(classes)
-        #dist = 1/tl.norm(X-mean_of_means, axis=1)
-        #weight = dist/tl.mean(dist)
-        #print(weight)
-        #return weight
+        # dist = 1/tl.norm(X-mean_of_means, axis=1)
+        # weight = dist/tl.mean(dist)
+        # print(weight)
+        # return weight
 
-        #lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
-        #X = tl.to_numpy(X)
-        #lda.fit(X,y)
-        #weights = lda.decision_function(X) - lda.intercept_
-        #weights = tl.tensor(weights)
-        #weights = tl.sqrt(1/tl.abs(weights))
-        #weights /= tl.mean(weights)
-        #print(weights)
-        #return weights
+        # lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
+        # X = tl.to_numpy(X)
+        # lda.fit(X,y)
+        # weights = lda.decision_function(X) - lda.intercept_
+        # weights = tl.tensor(weights)
+        # weights = tl.sqrt(1/tl.abs(weights))
+        # weights /= tl.mean(weights)
+        # print(weights)
+        # return weights
 
-        lda = LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
+        lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
         X = tl.to_numpy(X)
-        lda.fit(X,y)
+        lda.fit(X, y)
         y_pred = lda.predict_proba(X)
         weights = tl.zeros(len(X))
-        #for c,cls in enumerate(np.unique(y)):
+        # for c,cls in enumerate(np.unique(y)):
         #    weights[y==cls] = prob[y==cls,c]
-        #weights = tl.tensor(weights)
-        #weights = 1-weights
-        #weights /= tl.mean(weights)
+        # weights = tl.tensor(weights)
+        # weights = 1-weights
+        # weights /= tl.mean(weights)
         labels = np.unique(y)
         for i in range(len(X)):
-            weights[i] = log_loss(y[[i]], y_pred[[i]], labels=labels)         
-        weights/=tl.mean(weights)
+            weights[i] = log_loss(y[[i]], y_pred[[i]], labels=labels)
+        weights /= tl.mean(weights)
         print(weights)
         return weights
-
-
 
     @property
     def n_blocks_(self):
@@ -694,7 +698,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
     def n_params_(self):
         return sum([b.n_params_ for b in self.blocks_])
 
-    def transform(self, X, y=None, blocks=None, return_err=False,**_):
+    def transform(self, X, y=None, blocks=None, return_err=False, **_):
         assert tl.is_tensor(X)
         err = copy(X)
         n_samples, *_ = X.shape
@@ -704,7 +708,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         for b, block in enumerate(blocks):
             Xtb = block.transform(err, y)
             Xt.append(Xtb.reshape(n_samples, -1))
-            if b < len(blocks)-1:
+            if b < len(blocks) - 1:
                 err -= block.inv_transform(Xtb)
 
         Xt = tl.concatenate(Xt, axis=1)
@@ -744,7 +748,7 @@ class GreedyBTTDA(BTTDA):
         rank_grid=None,
         truncate=True,
         n_jobs=None,
-        clf = None,
+        clf=None,
     ):
         self.hoda_params = hoda_params
         self.verbose = verbose
@@ -754,7 +758,7 @@ class GreedyBTTDA(BTTDA):
         self.rank_grid = rank_grid
         self.truncate = truncate
         self.n_jobs = n_jobs
-        self.clf=clf
+        self.clf = clf
         super().__init__(
             hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
         )
@@ -762,13 +766,15 @@ class GreedyBTTDA(BTTDA):
     def log_rank_grid(self, shape):
         order = len(shape)
         grid = []
-        max_r = int(np.floor(np.log2(max(shape)) + 1))
-        for r in range(max_r):
-            rank = [2**r] * order
+        max_r = max(shape)
+        # max_r = sorted(shape)[-2]
+        max_lr = int(np.floor(np.log2(max_r) + 1))
+        for lr in range(max_lr):
+            rank = [2**lr] * order
             for k in range(order):
                 rank[k] = min(rank[k], shape[k])
             grid.append(tuple(rank))
-        #grid.append(tuple(shape))
+        grid.append(tuple(shape))
         grid = sorted(list(set(grid)))
         return grid
 
@@ -788,8 +794,9 @@ class GreedyBTTDA(BTTDA):
         # Create cross validation splits
         all_idc = np.arange(len(X))
         if test:
-            idc, test_idc, _, _ = train_test_split(all_idc, y, test_size=0.2,
-                                                   shuffle=True, random_state=42)
+            idc, test_idc, _, _ = train_test_split(
+                all_idc, y, test_size=0.2, shuffle=True, random_state=42
+            )
             splits = list(cv.split(idc, y[idc]))
             for f, (train_idc, val_idc) in enumerate(splits):
                 splits[f] = (idc[train_idc], idc[val_idc], test_idc)
@@ -801,15 +808,17 @@ class GreedyBTTDA(BTTDA):
         # Instantiate cross validation models
         fold_bttda = []
         hoda_params = self.hoda_params
-        hoda_params['verbose'] = False
+        hoda_params["verbose"] = False
         for _ in splits:
-            fold_bttda.append(BTTDA(
-                ranks=None,
-                hoda_params=self.hoda_params,
-                extra_train_info=False,
-                verbose=False,
-                forward=False,
-        ))
+            fold_bttda.append(
+                BTTDA(
+                    ranks=None,
+                    hoda_params=self.hoda_params,
+                    extra_train_info=False,
+                    verbose=False,
+                    forward=False,
+                )
+            )
 
         # Greedy hyperparameter search
         ranks = []
@@ -820,9 +829,9 @@ class GreedyBTTDA(BTTDA):
 
             # Evaluate different ranks
             val_scores = np.zeros((len(splits), len(rank_grid)))
-            for ri,r in enumerate(rank_grid):
+            for ri, r in enumerate(rank_grid):
                 if self.verbose:
-                    print(f"Trying rank {r}", end='\t')
+                    print(f"Trying rank {r}", end="\t")
 
                 ranks_candidate = ranks + [r]
                 fold_Xt = []
@@ -831,13 +840,13 @@ class GreedyBTTDA(BTTDA):
                     fold_bttda[fold].set_params(ranks=ranks_candidate)
                     blocks = fold_bttda[fold].blocks_[:b] if b else []
                     fold_bttda[fold] = fold_bttda[fold].fit(
-                        X[train_idc],y[train_idc], blocks=blocks
+                        X[train_idc], y[train_idc], blocks=blocks
                     )
                     fold_Xt.append(fold_bttda[fold].transform(X))
-                
+
                 for fold, (train_idc, val_idc, test_idc) in enumerate(splits):
                     Xt = fold_Xt[fold]
-                    clf = clone(self.clf).fit(Xt[train_idc], y[train_idc]) 
+                    clf = clone(self.clf).fit(Xt[train_idc], y[train_idc])
                     y_pred = clf.decision_function(Xt)
                     train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
                     val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
@@ -848,34 +857,36 @@ class GreedyBTTDA(BTTDA):
                         fold=fold,
                         train_score=train_score,
                         val_score=val_score,
-                        n_features = Xt.shape[-1]
+                        n_features=Xt.shape[-1],
                     )
                     if test:
-                        res['test_score'] = roc_auc_score(y[test_idc], y_pred[test_idc])
+                        res["test_score"] = roc_auc_score(y[test_idc], y_pred[test_idc])
                     self.model_select_info_.append(res)
 
                 if self.verbose:
-                    print(f'score: {np.mean(val_scores[:,ri]):.4f}')
+                    print(f"score: {np.mean(val_scores[:,ri]):.4f}")
 
             best_rank = rank_grid[np.argmax(np.mean(val_scores, axis=0))]
             best_score = np.max(np.mean(val_scores, axis=0))
             ranks.append(best_rank)
-            print()
-            print(f"Selected rank {best_rank} with score {best_score:.4f}")
-            print(f"New ranks: {ranks}")
-            print()
-            print()
-            
+            if self.verbose:
+                print()
+                print(f"Selected rank {best_rank} with score {best_score:.4f}")
+                print(f"New ranks: {ranks}")
+                print()
+                print()
+
             # Fit forward
             for fold, (train_idc, val_idc, test_idc) in enumerate(splits):
                 fold_bttda[fold].set_params(ranks=ranks)
                 fold_bttda[fold].set_params(forward=True)
-                blocks=fold_bttda[fold].blocks_[:b] if b else []
+                blocks = fold_bttda[fold].blocks_[:b] if b else []
                 fold_bttda[fold] = fold_bttda[fold].fit(
-                        X[train_idc],y[train_idc], blocks=blocks,
+                    X[train_idc],
+                    y[train_idc],
+                    blocks=blocks,
                 )
 
-                    
         self.ranks = ranks
         self.model_select_info_ = pd.DataFrame(self.model_select_info_)
         self.model_select_info_ = self.model_select_info_.set_index(["block", "rank"])
