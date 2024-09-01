@@ -49,16 +49,6 @@ def stf_tensor(
     morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
     Xt = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
 
-    # Baseline
-    # if baseline_params is not None:
-    #    baseline_params.setdefault("baseline", (0.1, 0.4))
-    #    baseline_params.setdefault("mode", "logratio")
-    #    n_times = X.shape[-1]
-    #    tmin = 0
-    #    tmax = n_times / sfreq + tmin
-    #    times = np.linspace(tmin, tmax, n_times)
-    #    Xt = rescale(Xt, times, **baseline_params)
-
     # Time bins
     n_samples = X.shape[-1]
     epoch_len = n_samples / sfreq
@@ -68,9 +58,6 @@ def stf_tensor(
         -1,
         Xt,
     )
-
-    if log:
-        Xt = np.log(Xt)
 
     # Zscore
     if normalize:
