@@ -38,8 +38,8 @@ def stf_tensor(
     baseline_params=None,
     bin_freq=16,
     n_freqs=16,
-    zscore=True,
-    sqrt=True,
+    normalize=True,
+    log=False,
 ):
     # TFR
     if morlet_params is None:
@@ -69,13 +69,14 @@ def stf_tensor(
         Xt,
     )
 
+    if log:
+        Xt = np.log(Xt)
+
     # Zscore
-    if zscore:
+    if normalize:
         mu = Xt.mean(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
         sigma = Xt.std(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
         Xt = (Xt - mu) / sigma
-    if sqrt:
-        return np.sqrt(Xt)
     return Xt
 
 
