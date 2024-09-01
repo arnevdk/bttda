@@ -42,7 +42,9 @@ def mode_scatter(
     if shrinkage == "lw":
         Xf = tl.unfold(X, k + 1)
         shrinkage = ledoit_wolf_shrinkage(
-            Xf.T, assume_centered=assume_centered, n_iid_samples=n_samples
+            Xf.T,
+            assume_centered=assume_centered,
+            # n_iid_samples=n_samples
         )
     elif shrinkage == "oas":
         Xf = tl.unfold(X, k + 1)
@@ -50,7 +52,7 @@ def mode_scatter(
             Xf.T,
             assume_centered=assume_centered,
             emp_cov=scatter,
-            n_iid_samples=n_samples,
+            # n_iid_samples=n_samples,
         )
     elif shrinkage == "ell1":
         raise NotImplementedError
@@ -85,7 +87,10 @@ def force_toeplitz(A, taper=False):
 
 
 def ledoit_wolf_shrinkage(
-    X, assume_centered=False, block_size=1000, n_iid_samples=None
+    X,
+    assume_centered=False,
+    block_size=1000,
+    # n_iid_samples=None
 ):
     """Estimate the shrunk Ledoit-Wolf covariance matrix.
     Read more in the :ref:`User Guide <shrunk_covariance>`.
@@ -175,7 +180,12 @@ def ledoit_wolf_shrinkage(
     return shrinkage
 
 
-def oas(X, emp_cov=None, assume_centered=False, n_iid_samples=None):
+def oas(
+    X,
+    emp_cov=None,
+    assume_centered=False,
+    # n_iid_samples=None
+):
     """Estimate covariance with the Oracle Approximating Shrinkage algorithm.
 
     The formulation is based on [1]_.
@@ -210,8 +220,8 @@ def oas(X, emp_cov=None, assume_centered=False, n_iid_samples=None):
     mu = tl.trace(emp_cov) / n_features
     mu_squared = mu**2
 
-    if n_iid_samples is not None:
-        n_samples = n_iid_samples
+    # if n_iid_samples is not None:
+    #    n_samples = n_iid_samples
 
     # The factor 1 / p**2 will cancel out since it is in both the numerator and
     # denominator

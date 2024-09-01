@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.linalg
+import scipy.stats
 import tensorly as tl
 from mne.baseline import rescale
 from mne.time_frequency import tfr_array_morlet
@@ -33,26 +34,27 @@ def hankel_tensor_inv(Xh, y=None):
 def stf_tensor(
     X,
     sfreq=None,
-    y=None,
     morlet_params=None,
-    #bin_freq=25,
+    baseline_params=None,
     bin_freq=16,
-    n_freqs = 16,
+    n_freqs=16,
     zscore=True,
+    sqrt=True,
 ):
     # TFR
     if morlet_params is None:
         morlet_params = dict()
-    morlet_params["output"] = "power"
+    morlet_params["output"] = "complex"
     morlet_params.setdefault("freqs", np.geomspace(8, 32, n_freqs))
     morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
     Xt = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
 
-    ## Baseline
+    # Baseline
     # if baseline_params is not None:
-    #    baseline_params.setdefault("baseline", (-0.15, -0.05))
+    #    baseline_params.setdefault("baseline", (0.1, 0.4))
     #    baseline_params.setdefault("mode", "logratio")
     #    n_times = X.shape[-1]
+    #    tmin = 0
     #    tmax = n_times / sfreq + tmin
     #    times = np.linspace(tmin, tmax, n_times)
     #    Xt = rescale(Xt, times, **baseline_params)
@@ -67,11 +69,13 @@ def stf_tensor(
         Xt,
     )
 
+    # Zscore
     if zscore:
-        mean = Xt.mean(axis=0)
-        std = Xt.std(axis=0)
-        Xt = (Xt - mean) / std
-
+        mu = Xt.mean(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
+        sigma = Xt.std(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
+        Xt = (Xt - mu) / sigma
+    if sqrt:
+        return np.sqrt(Xt)
     return Xt
 
 
