@@ -3,6 +3,7 @@ import scipy.linalg
 import scipy.stats
 import tensorly as tl
 from mne.baseline import rescale
+from mne.filter import filter_data
 from mne.time_frequency import tfr_array_morlet
 from sklearn.base import TransformerMixin
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
@@ -36,10 +37,10 @@ def stf_tensor(
     sfreq=None,
     morlet_params=None,
     baseline_params=None,
-    bin_freq=16,
-    n_freqs=16,
+    bin_freq=8,
+    n_freqs=8,
     normalize=True,
-    log=False,
+    log=True,
 ):
     # TFR
     if morlet_params is None:
@@ -47,24 +48,41 @@ def stf_tensor(
     morlet_params["output"] = "complex"
     morlet_params.setdefault("freqs", np.geomspace(8, 32, n_freqs))
     morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
-    Xt = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
+    X_tfr = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
+
+    # n_samples, n_channels, n_times = X.shape
+    # X_tfr = np.zeros((n_samples, n_channels, n_freqs, n_times))
+    # freqs = np.geomspace(8, 32, n_freqs + 1)
+    # for f in range(len(freqs) - 1):
+    #   print((freqs[f], freqs[f + 1]))
+    #   xf = filter_data(X, sfreq, freqs[f], freqs[f + 1])
+    #   xf = scipy.signal.hilbert(xf)
+    #   xf = np.abs(xf)
+    #   X_tfr[:, :, f, :] = xf
+
+    # X_tfr = X
 
     # Time bins
     n_samples = X.shape[-1]
     epoch_len = n_samples / sfreq
     n_bins = int(bin_freq * epoch_len)
-    Xt = np.apply_along_axis(
+    X_tfr = np.apply_along_axis(
         lambda x: scipy.stats.binned_statistic(np.arange(len(x)), x, bins=n_bins)[0],
         -1,
-        Xt,
+        X_tfr,
     )
+
+    if log:
+        X_tfr = np.log(X_tfr)
 
     # Zscore
     if normalize:
-        mu = Xt.mean(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
-        sigma = Xt.std(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
-        Xt = (Xt - mu) / sigma
-    return Xt
+        # mu = Xt.mean(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
+        # sigma = Xt.std(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
+        mu = X_tfr.mean(axis=0)[np.newaxis]
+        sigma = X_tfr.std(axis=0)[np.newaxis]
+        X_tfr = (X_tfr - mu) / sigma
+    return X_tfr
 
 
 def crop(X, begin=0, end=None, sfreq=None, tmin=None):

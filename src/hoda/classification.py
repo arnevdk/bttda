@@ -1,5 +1,6 @@
-import numpy as np
 import math
+
+import numpy as np
 import tensorly as tl
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
@@ -25,15 +26,18 @@ class ZScore(BaseEstimator, TransformerMixin):
 
 
 class SelectF(BaseEstimator, TransformerMixin):
-    def __init__(self, alpha=0.5):
+    def __init__(self, alpha=0.5, verbose=False):
         self.alpha = alpha
+        self.verbose = verbose
 
     def fit(self, X, y=None):
-        n_samples, *shape = X.shape
+        n_samples, *_ = X.shape
         self.F_, self.p_ = f_oneway(X, y)
         self.mask_ = self.p_ < self.alpha
         if not np.any(self.mask_):
             self.mask_[np.argmax(self.F_)] = True
+        if self.verbose:
+            print(f"Selected {np.count_nonzero(self.mask_)}/{len(self.mask_)} features")
         return self
 
     def transform(self, X, y=None):
