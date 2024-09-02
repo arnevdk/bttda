@@ -1,4 +1,5 @@
 import math
+import pdb
 
 import numpy as np
 import tensorly as tl
@@ -8,6 +9,7 @@ from sklearn.preprocessing import FunctionTransformer
 from hoda.backend import std
 from hoda.tensorize import vec
 from hoda.util import f_oneway
+from kneed import KneeLocator
 
 try:
     from toeplitzlda.classification import ToeplitzLDA
@@ -26,14 +28,22 @@ class ZScore(BaseEstimator, TransformerMixin):
 
 
 class SelectF(BaseEstimator, TransformerMixin):
-    def __init__(self, alpha=0.5, verbose=False):
+    def __init__(self, alpha=None, verbose=False):
         self.alpha = alpha
         self.verbose = verbose
 
     def fit(self, X, y=None):
         n_samples, *_ = X.shape
         self.F_, self.p_ = f_oneway(X, y)
-        self.mask_ = self.p_ < self.alpha
+        if self.alpha is None:
+            F = tl.to_numpy(self.F_)
+            if len(F) > 2:
+                kneedle=KneeLocator(np.arange(len(F)), sorted(F), curve='convex', direction='increasing')
+                self.mask_ = self.F_>=kneedle.knee_y
+            else:   
+                self.mask_ = tl.ones(len(F), dtype=bool)
+        else:
+            self.mask_ = self.p_ < self.alpha
         if not np.any(self.mask_):
             self.mask_[np.argmax(self.F_)] = True
         if self.verbose:

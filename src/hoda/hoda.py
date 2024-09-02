@@ -644,7 +644,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             self.blocks_.append(block)
             G = block.transform(err)
             if b < len(self.ranks) - 1 or self.forward:
-                if not hasattr(block, "aps_"):
+                ir not hasattr(block, "aps_"):
                     block.fit_forward(err, y, Xt=G)
                 err -= block.inv_transform(G)
             # Calculate train info
@@ -828,9 +828,9 @@ class GreedyBTTDA(BTTDA):
                     Xt = fold_Xt[fold]
                     clf = clone(self.clf).fit(Xt[train_idc], y[train_idc])
                     y_pred = clf.predict_proba(Xt)[:, 1]
-                    y_pred = cross_val_predict(
-                        clf, Xt, y, n_jobs=-1, method="predict_proba"
-                    )[:, 1]
+                    #y_pred = cross_val_predict(
+                    #    clf, Xt, y, n_jobs=-1, method="predict_proba"
+                    #)[:, 1]
                     train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
                     val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
                     val_scores[fold, ri] = val_score
