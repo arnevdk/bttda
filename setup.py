@@ -7,7 +7,7 @@ setup(
     url="https://gitlab.kuleuven.be/compneuro/hoda-bci",
     author="Arne Van Den Kerchove",
     author_email="arne.vandenkerchove@kuleuven.be",
-    install_requires=["scikit-learn", "tensorly", "opt_einsum", "tqdm"],
+    install_requires=["scikit-learn", "tensorly", "opt_einsum", "tqdm", "kneed"],
     extras_require={
         "experiments": [
             # "mne<=1.6.1",
