@@ -422,17 +422,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     update = np.inf
                     shrink = np.nan
                 else:
-                    # modes = range(1, order + 1)
-                    # G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
-                    # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    # cov_cross = tl.tensordot(X, G, axes=(modes, modes))
-                    # cov_g, shrink = mode_scatter(
-                    #    G,
-                    #    k,
-                    #    shrinkage=self.shrinkage,
-                    #    assume_centered=True,
-                    # )
-                    # ap = tl.solve(cov_g.T, cov_cross.T).T
+                    modes = range(1, order + 1)
+                    G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
+                    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    cov_cross = tl.tensordot(X, G, axes=(modes, modes))
+                    cov_g, shrink = mode_scatter(
+                        G,
+                        k,
+                        shrinkage=self.shrinkage,
+                        assume_centered=True,
+                    )
+                    ap = tl.solve(cov_g.T, cov_cross.T).T
 
                     # Gk = tl.unfold(G, k + 1)
                     # Xk = tl.unfold(X, k + 1)
@@ -440,19 +440,19 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     # ap = ap.T
                     # shrink = 0
 
-                    modes = range(1, order + 1)
-                    G = tl.tenalg.multi_mode_dot(
-                        X, self.weights_, modes=modes, transpose=True, skip=k
-                    )
-                    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    cov_cross = tl.tensordot(G, Xt, axes=(modes, modes))
-                    cov, shrink = mode_scatter(
-                        Xt,
-                        k,
-                        shrinkage=self.shrinkage,
-                        assume_centered=True,
-                    )
-                    ap = tl.solve(cov.T, cov_cross.T).T
+                    # modes = range(1, order + 1)
+                    # G = tl.tenalg.multi_mode_dot(
+                    #    X, self.weights_, modes=modes, transpose=True, skip=k
+                    # )
+                    # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    # cov_cross = tl.tensordot(G, Xt, axes=(modes, modes))
+                    # cov, shrink = mode_scatter(
+                    #    Xt,
+                    #    k,
+                    #    shrinkage=self.shrinkage,
+                    #    assume_centered=True,
+                    # )
+                    # ap = tl.solve(cov.T, cov_cross.T).T
                     # Gk = tl.unfold(G, k + 1)
                     # Xtk = tl.unfold(Xt, k + 1)
                     # ap, *_ = lstsq(Xtk.T, Gk.T)

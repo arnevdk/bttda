@@ -37,6 +37,8 @@ def stf_tensor(
     sfreq=None,
     morlet_params=None,
     baseline_params=None,
+    l_freq=8,
+    h_freq=32,
     bin_freq=4,
     n_freqs=4,
     normalize=True,
@@ -53,7 +55,7 @@ def stf_tensor(
     # TFR filter-hilbert
     n_samples, n_channels, n_times = X.shape
     X_tfr = np.zeros((n_samples, n_channels, n_freqs, n_times))
-    freqs = np.geomspace(8, 32, n_freqs + 1)
+    freqs = np.geomspace(l_freq, h_freq, n_freqs + 1)
     for f in range(len(freqs) - 1):
         xf = filter_data(X, sfreq, freqs[f], freqs[f + 1])
         xf = scipy.signal.hilbert(xf)
