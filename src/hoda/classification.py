@@ -3,13 +3,13 @@ import pdb
 
 import numpy as np
 import tensorly as tl
+from kneed import KneeLocator
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
 
 from hoda.backend import std
 from hoda.tensorize import vec
 from hoda.util import f_oneway
-from kneed import KneeLocator
 
 try:
     from toeplitzlda.classification import ToeplitzLDA
@@ -38,9 +38,11 @@ class SelectF(BaseEstimator, TransformerMixin):
         if self.alpha is None:
             F = tl.to_numpy(self.F_)
             if len(F) > 2:
-                kneedle=KneeLocator(np.arange(len(F)), sorted(F), curve='convex', direction='increasing')
-                self.mask_ = self.F_>=kneedle.knee_y
-            else:   
+                kneedle = KneeLocator(
+                    np.arange(len(F)), sorted(F), curve="convex", direction="increasing"
+                )
+                self.mask_ = self.F_ >= kneedle.knee_y
+            else:
                 self.mask_ = tl.ones(len(F), dtype=bool)
         else:
             self.mask_ = self.p_ < self.alpha

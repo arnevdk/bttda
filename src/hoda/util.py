@@ -120,12 +120,12 @@ def f_multiway(
     method="tr",
 ):
     n_samples, *shape = X.shape
-    n_features=math.prod(shape)
+    n_features = math.prod(shape)
     if not tl.is_tensor(X):
         X = tl.tensor(X)
     if classes is None or class_counts is None:
         classes, class_counts = np.unique(y, return_counts=True)
-    n_classes=len(classes)
+    n_classes = len(classes)
     # Calculate class means, overall class mean and center data
     if assume_centered:
         X_centered = X
@@ -142,7 +142,7 @@ def f_multiway(
             mean_centered = means[ci] - class_mean
             tr_scatter_b += class_counts[ci] * norm_fro(mean_centered) ** 2
         # Calculate Fisher ratio
-        F = (tr_scatter_b / tr_scatter_w)*((n_classes-1)/(n_samples-n_classes))
+        F = (tr_scatter_b / tr_scatter_w) * ((n_classes - 1) / (n_samples - n_classes))
     elif method == "rt":
         X_centered_flat = tl.unfold(X_centered, 0)
 
@@ -160,6 +160,7 @@ def f_multiway(
             "method must be either 'tr' (trace-ratio) or 'rt' (ratio-trace)"
         )
     return F
+
 
 def r_squared(
     X,
@@ -182,9 +183,9 @@ def r_squared(
             raise ValueError("must specify means when assume_centered=True")
     else:
         means, X_centered = center(X, y, classes)
-    SS_res = norm_fro(X_centered)**2
-    SS_tot = norm_fro(X)**2
-    return 1-SS_res/SS_tot
+    SS_res = norm_fro(X_centered) ** 2
+    SS_tot = norm_fro(X) ** 2
+    return 1 - SS_res / SS_tot
 
 
 def f_oneway(X, y, classes=None, class_counts=None):
@@ -215,9 +216,10 @@ def f_oneway(X, y, classes=None, class_counts=None):
     p = fdtrc(dfbn, dfwn, F)
     return F, p
 
+
 def lstsq_ridge(X, y, lambda_=1):
-    I =  tl.eye(X.shape[1])
-    XTX = X.T@X
+    I = tl.eye(X.shape[1])
+    XTX = X.T @ X
     n_features = XTX.shape[0]
-    pseudo_inverse = pinv(XTX + lambda_*tl.trace(XTX)*I/n_features) @ X.T
+    pseudo_inverse = pinv(XTX + lambda_ * tl.trace(XTX) * I / n_features) @ X.T
     return pseudo_inverse @ y

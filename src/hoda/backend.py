@@ -37,7 +37,16 @@ def std(X, **kwargs):
     elif tl.get_backend() == "cupy":
         return cupy.std(X, **kwargs)
     else:
-        raise NotImplemented
+        raise NotImplementedError
+
+
+def var(X, **kwargs):
+    if tl.get_backend() == "numpy":
+        return np.var(X, **kwargs)
+    elif tl.get_backend() == "cupy":
+        return cupy.var(X, **kwargs)
+    else:
+        raise NotImplementedError
 
 
 def lanczos(*args, **kwargs):

@@ -37,30 +37,28 @@ def stf_tensor(
     sfreq=None,
     morlet_params=None,
     baseline_params=None,
-    bin_freq=8,
-    n_freqs=8,
+    bin_freq=4,
+    n_freqs=4,
     normalize=True,
     log=True,
 ):
-    # TFR
-    if morlet_params is None:
-        morlet_params = dict()
-    morlet_params["output"] = "complex"
-    morlet_params.setdefault("freqs", np.geomspace(8, 32, n_freqs))
-    morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
-    X_tfr = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
+    # TFR morlet
+    # if morlet_params is None:
+    #    morlet_params = dict()
+    # morlet_params["output"] = "complex"
+    # morlet_params.setdefault("freqs", np.geomspace(8, 32, n_freqs))
+    # morlet_params.setdefault("n_cycles", morlet_params["freqs"] * 0.7)
+    # X_tfr = np.abs(tfr_array_morlet(X, sfreq, **morlet_params))
 
-    # n_samples, n_channels, n_times = X.shape
-    # X_tfr = np.zeros((n_samples, n_channels, n_freqs, n_times))
-    # freqs = np.geomspace(8, 32, n_freqs + 1)
-    # for f in range(len(freqs) - 1):
-    #   print((freqs[f], freqs[f + 1]))
-    #   xf = filter_data(X, sfreq, freqs[f], freqs[f + 1])
-    #   xf = scipy.signal.hilbert(xf)
-    #   xf = np.abs(xf)
-    #   X_tfr[:, :, f, :] = xf
-
-    # X_tfr = X
+    # TFR filter-hilbert
+    n_samples, n_channels, n_times = X.shape
+    X_tfr = np.zeros((n_samples, n_channels, n_freqs, n_times))
+    freqs = np.geomspace(8, 32, n_freqs + 1)
+    for f in range(len(freqs) - 1):
+        xf = filter_data(X, sfreq, freqs[f], freqs[f + 1])
+        xf = scipy.signal.hilbert(xf)
+        xf = np.abs(xf)
+        X_tfr[:, :, f, :] = xf
 
     # Time bins
     n_samples = X.shape[-1]

@@ -26,8 +26,7 @@ from hoda.backend import copy, lstsq, pinv, std
 from hoda.classification import SelectF
 from hoda.cov import KroneckerCovariance, mode_scatter
 from hoda.tensorize import Vectorize, vec
-from hoda.util import (center, f_multiway, f_oneway, lstsq_ridge, r_squared,
-                       trunc_eigh)
+from hoda.util import center, f_multiway, lstsq_ridge, r_squared, trunc_eigh
 
 # from statsmodels.discrete.discrete_model import Logit
 # from tqdm.notebook import tqdm
@@ -414,26 +413,70 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 if not i:
                     ap = copy(self.weights_[k])
                     # ap = tl.eye(shape[k])[:, : self.rank_[k]]
+                    # ap = tl.random.base.random_tensor((shape[k], self.rank_[k]))
+                    # ap, _, _ = tl.tenalg.svd_interface(
+                    #    tl.unfold(X, k + 1),
+                    #    method="truncated_svd",
+                    #    n_eigenvecs=self.rank_[k],
+                    # )
                     update = np.inf
                     shrink = np.nan
                 else:
-                    modes = range(1, order + 1)
-                    G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
-
-                    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    cov_cross = tl.tensordot(X, G, axes=(modes, modes))
-                    cov_g, shrink = mode_scatter(
-                        G,
-                        k,
-                        shrinkage=self.shrinkage,
-                        assume_centered=True,
-                    )
-                    ap = tl.solve(cov_g.T, cov_cross.T).T
+                    # modes = range(1, order + 1)
+                    # G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
+                    # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    # cov_cross = tl.tensordot(X, G, axes=(modes, modes))
+                    # cov_g, shrink = mode_scatter(
+                    #    G,
+                    #    k,
+                    #    shrinkage=self.shrinkage,
+                    #    assume_centered=True,
+                    # )
+                    # ap = tl.solve(cov_g.T, cov_cross.T).T
 
                     # Gk = tl.unfold(G, k + 1)
                     # Xk = tl.unfold(X, k + 1)
                     # ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
-                    ## ap = lstsq_ridge(Gk.T, Xk.T, lambda_=.5)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    modes = range(1, order + 1)
+                    G = tl.tenalg.multi_mode_dot(
+                        X, self.weights_, modes=modes, transpose=True, skip=k
+                    )
+                    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    cov_cross = tl.tensordot(G, Xt, axes=(modes, modes))
+                    cov, shrink = mode_scatter(
+                        Xt,
+                        k,
+                        shrinkage=self.shrinkage,
+                        assume_centered=True,
+                    )
+                    ap = tl.solve(cov.T, cov_cross.T).T
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xtk = tl.unfold(Xt, k + 1)
+                    # ap, *_ = lstsq(Xtk.T, Gk.T)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    # G = tl.tenalg.mode_dot(X, self.weights_[k].T, mode=k + 1)
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X, k + 1)
+                    # ap, *_ = lstsq(Gk.T, Xk.T)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    # w = []
+                    # for kk in range(order):
+                    #    if k == kk:
+                    #        w.append(self.weights_[kk])
+                    #    else:
+                    #        w.append(self.weights_[kk] @ self.aps_[kk].T)
+                    # modes = range(1, order + 1)
+                    # G = tl.tenalg.multi_mode_dot(X, w, modes=modes, transpose=True)
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X, k + 1)
+                    # ap, *_ = lstsq(Gk.T, Xk.T)
                     # ap = ap.T
                     # shrink = 0
 
@@ -745,17 +788,17 @@ class GreedyBTTDA(BTTDA):
     def log_rank_grid(self, shape):
         order = len(shape)
         grid = []
-        # max_r = max(shape)
+        max_r = max(shape)
         # max_r = sorted(shape)[-2]
-        max_r = min(shape)
+        # max_r = min(shape)
         max_lr = int(np.floor(np.log2(max_r) + 1))
         for lr in range(max_lr):
             rank = [2**lr] * order
             for k in range(order):
                 rank[k] = min(rank[k], shape[k])
             grid.append(tuple(rank))
-        # grid.append(tuple(shape))
-        grid.append(tuple([min(shape)] * order))
+        grid.append(tuple(shape))
+        # grid.append(tuple([min(shape)] * order))
         # grid = sorted(list(set(grid)))
         return grid
 

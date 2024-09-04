@@ -7,7 +7,7 @@ import numpy as np
 import tensorly as tl
 from sklearn.base import BaseEstimator
 
-from hoda.backend import toeplitz
+from hoda.backend import toeplitz, var
 
 try:
     import cupy
@@ -44,26 +44,19 @@ def mode_scatter(
         shrinkage = ledoit_wolf_shrinkage(
             Xf.T,
             assume_centered=assume_centered,
-            # n_iid_samples=n_samples
         )
     elif shrinkage == "oas":
-        Xf = tl.unfold(X, k + 1)
-        shrinkage = oas(
-            Xf.T,
-            assume_centered=assume_centered,
-            emp_cov=scatter,
-            # n_iid_samples=n_samples,
-        )
+        raise NotImplementedError
+    elif shrinkage == "ss":
+        shrinkage = schaefer_strimmer_shrinkage(X, k)
     elif shrinkage == "ell1":
         raise NotImplementedError
     elif shrinkage == "ell2":
         raise NotImplementedError
     elif shrinkage == "ell3":
         raise NotImplementedError
-    elif shrinkage == "schaefer":
-        raise NotImplementedError
     elif shrinkage == "loocv":
-        raise NotImplementedError
+        raise NotImplemented
     # Shrink
     # if not n_features in eyes.keys():
     #    eyes[n_features] = tl.eye(n_features)
@@ -86,11 +79,24 @@ def force_toeplitz(A, taper=False):
     return toeplitz(toep)
 
 
+def schaefer_strimmer_shrinkage(X, k):
+    M, *shape = X.shape
+    Xk = tl.unfold(X, k + 1)
+    S = Xk @ Xk.T
+    num = 0
+    for i in range(shape[k]):
+        for j in range(shape[k]):
+            num += var(Xk[i, :] * Xk[j, :])
+    nu = tl.trace(S) / shape[k]
+    den = tl.norm(S - nu * tl.eye(shape[k])) ** 2
+    shrinkage = (M / (M - 1) ** 2) * (num / den)
+    return shrinkage
+
+
 def ledoit_wolf_shrinkage(
     X,
     assume_centered=False,
     block_size=1000,
-    # n_iid_samples=None
 ):
     """Estimate the shrunk Ledoit-Wolf covariance matrix.
     Read more in the :ref:`User Guide <shrunk_covariance>`.
@@ -184,7 +190,6 @@ def oas(
     X,
     emp_cov=None,
     assume_centered=False,
-    # n_iid_samples=None
 ):
     """Estimate covariance with the Oracle Approximating Shrinkage algorithm.
 
@@ -219,9 +224,6 @@ def oas(
     alpha = tl.mean(emp_cov**2)
     mu = tl.trace(emp_cov) / n_features
     mu_squared = mu**2
-
-    # if n_iid_samples is not None:
-    #    n_samples = n_iid_samples
 
     # The factor 1 / p**2 will cancel out since it is in both the numerator and
     # denominator
