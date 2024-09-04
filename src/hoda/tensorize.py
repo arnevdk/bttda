@@ -57,7 +57,7 @@ def stf_tensor(
     X_tfr = np.zeros((n_samples, n_channels, n_freqs, n_times))
     freqs = np.geomspace(l_freq, h_freq, n_freqs + 1)
     for f in range(len(freqs) - 1):
-        xf = filter_data(X, sfreq, freqs[f], freqs[f + 1])
+        xf = filter_data(X, sfreq, freqs[f], freqs[f + 1], verbose=False)
         xf = scipy.signal.hilbert(xf)
         xf = np.abs(xf)
         X_tfr[:, :, f, :] = xf
