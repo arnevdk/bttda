@@ -819,7 +819,7 @@ class GreedyBTTDA(BTTDA):
         all_idc = np.arange(len(X))
         if test:
             idc, test_idc, _, _ = train_test_split(
-                all_idc, y, test_size=0.2, shuffle=True, random_state=3
+                all_idc, y, test_size=0.2, shuffle=True, random_state=42
             )
             splits = list(cv.split(idc, y[idc]))
             for f, (train_idc, val_idc) in enumerate(splits):
@@ -922,9 +922,13 @@ class GreedyBTTDA(BTTDA):
         if self.truncate:
             df = self.model_select_info_best_
             df = df.groupby(["block", "rank"])
-            df = df["val_score"].aggregate("mean")
-            best_block, _ = df.idxmax()
-            best_n_blocks = best_block + 1
+            score = df["val_score"].aggregate("mean").to_numpy()
+            best_n_blocks = 1
+            for b in range(1, len(score)):
+                if score[b] > score[b - 1]:
+                    best_n_blocks = b + 1
+                else:
+                    break
             ranks = ranks[:best_n_blocks]
 
         # Train BTTDA
