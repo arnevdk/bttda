@@ -869,12 +869,13 @@ class GreedyBTTDA(BTTDA):
                     fold_Xt = fold_bttda[fold].transform(X)
 
                     clf = clone(self.clf).fit(fold_Xt[train_idc], y[train_idc])
-                    y_pred = clf.predict_proba(fold_Xt)[:, 1]
-                    # y_pred = cross_val_predict(
-                    #    clf, fold_Xt, y, n_jobs=-1, method="predict_proba"
-                    # )[:, 1]
-                    train_score = roc_auc_score(y[train_idc], y_pred[train_idc])
-                    val_score = roc_auc_score(y[val_idc], y_pred[val_idc])
+                    y_pred = clf.predict_proba(fold_Xt)
+                    train_score = roc_auc_score(
+                        y[train_idc], y_pred[train_idc], multi_class="ovr"
+                    )
+                    val_score = roc_auc_score(
+                        y[val_idc], y_pred[val_idc], multi_class="ovr"
+                    )
                     val_scores[fold, ri] = val_score
                     res = dict(
                         block=b,
@@ -885,7 +886,9 @@ class GreedyBTTDA(BTTDA):
                         n_features=fold_Xt.shape[-1],
                     )
                     if test:
-                        res["test_score"] = roc_auc_score(y[test_idc], y_pred[test_idc])
+                        res["test_score"] = roc_auc_score(
+                            y[test_idc], y_pred[test_idc], multi_class="ovr"
+                        )
                     self.model_select_info_.append(res)
 
                 if self.verbose:
