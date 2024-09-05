@@ -46,7 +46,9 @@ def mode_scatter(
             assume_centered=assume_centered,
         )
     elif shrinkage == "oas":
-        raise NotImplementedError
+        n = n_samples * math.prod(shape) / shape[k]
+        cov = scatter / (n - 1)
+        shrinkage = oas(cov, n)
     elif shrinkage == "ss":
         shrinkage = schaefer_strimmer_shrinkage(X, k)
     elif shrinkage == "ell1":
@@ -77,20 +79,6 @@ def force_toeplitz(A, taper=False):
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper
     return toeplitz(toep)
-
-
-def schaefer_strimmer_shrinkage(X, k):
-    M, *shape = X.shape
-    Xk = tl.unfold(X, k + 1)
-    S = Xk @ Xk.T
-    num = 0
-    for i in range(shape[k]):
-        for j in range(shape[k]):
-            num += var(Xk[i, :] * Xk[j, :])
-    nu = tl.trace(S) / shape[k]
-    den = tl.norm(S - nu * tl.eye(shape[k])) ** 2
-    shrinkage = (M / (M - 1) ** 2) * (num / den)
-    return shrinkage
 
 
 def ledoit_wolf_shrinkage(
@@ -186,11 +174,7 @@ def ledoit_wolf_shrinkage(
     return shrinkage
 
 
-def oas(
-    X,
-    emp_cov=None,
-    assume_centered=False,
-):
+def oas(emp_cov, n_samples):
     """Estimate covariance with the Oracle Approximating Shrinkage algorithm.
 
     The formulation is based on [1]_.
@@ -199,38 +183,19 @@ def oas(
         IEEE Transactions on Signal Processing, 58(10), 5016-5029, 2010.
         https://arxiv.org/pdf/0907.4698.pdf
     """
-    n_samples, n_features = X.shape
-    if not assume_centered:
-        X = X - tl.mean(X, axis=0)
-
-    if emp_cov is None:
-        emp_cov = X.T @ X / (n_samples - 1)
-
+    n_features = emp_cov.shape[0]
     if n_features == 1:
         return 0
 
-    # The shrinkage is defined as:
-    # shrinkage = min(
-    # trace(S @ S.T) + trace(S)**2) / ((n + 1) (trace(S @ S.T) - trace(S)**2 / p), 1
-    # )
-    # where n and p are n_samples and n_features, respectively (cf. Eq. 23 in [1]).
-    # The factor 2 / p is omitted since it does not impact the value of the estimator
-    # for large p.
+    p = n_features
+    n = n_samples
+    S = emp_cov
 
-    # Instead of computing trace(S)**2, we can compute the average of the squared
-    # elements of S that is equal to trace(S)**2 / p**2.
-    # See the definition of the Frobenius norm:
-    # https://en.wikipedia.org/wiki/Matrix_norm#Frobenius_norm
-    alpha = tl.mean(emp_cov**2)
-    mu = tl.trace(emp_cov) / n_features
-    mu_squared = mu**2
-
-    # The factor 1 / p**2 will cancel out since it is in both the numerator and
-    # denominator
-    num = alpha + mu_squared
-    den = (n_samples + 1) * (alpha - mu_squared / n_features)
-    # shrinkage = 1.0 if den == 0 else min(num / den, 1.0)
+    num = (1 - 2 / p) * tl.trace(S**2) + tl.trace(S) ** 2
+    den = (n + 1 - 2 / p) * (tl.trace(S**2) - tl.trace(S) ** 2 / n_features)
     shrinkage = num / den
+    shrinkage = min(shrinkage, 1)
+    shrinkage = max(shrinkage, 0)
     return shrinkage
 
 
