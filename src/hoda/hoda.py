@@ -819,7 +819,7 @@ class GreedyBTTDA(BTTDA):
         all_idc = np.arange(len(X))
         if test:
             idc, test_idc, _, _ = train_test_split(
-                all_idc, y, test_size=0.2, shuffle=True, random_state=42
+                all_idc, y, test_size=0.2, shuffle=True, random_state=1, stratify=y
             )
             splits = list(cv.split(idc, y[idc]))
             for f, (train_idc, val_idc) in enumerate(splits):
