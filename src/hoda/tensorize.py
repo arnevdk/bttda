@@ -1,3 +1,5 @@
+import pdb
+
 import numpy as np
 import scipy.linalg
 import scipy.stats
@@ -58,8 +60,7 @@ def stf_tensor(
     freqs = np.geomspace(l_freq, h_freq, n_freqs + 1)
     for f in range(len(freqs) - 1):
         xf = filter_data(X, sfreq, freqs[f], freqs[f + 1], verbose=False)
-        xf = scipy.signal.hilbert(xf)
-        xf = np.abs(xf)
+        xf = np.abs(scipy.signal.hilbert(xf))
         X_tfr[:, :, f, :] = xf
 
     # Time bins
@@ -77,10 +78,8 @@ def stf_tensor(
 
     # Zscore
     if normalize:
-        # mu = Xt.mean(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
-        # sigma = Xt.std(axis=(0, 1, 3))[np.newaxis, np.newaxis, :, np.newaxis]
-        mu = X_tfr.mean(axis=0)[np.newaxis]
-        sigma = X_tfr.std(axis=0)[np.newaxis]
+        mu = X_tfr.mean(axis=(0, 3))[np.newaxis, :, :, np.newaxis]
+        sigma = X_tfr.std(axis=(0, 3))[np.newaxis, :, :, np.newaxis]
         X_tfr = (X_tfr - mu) / sigma
     return X_tfr
 
