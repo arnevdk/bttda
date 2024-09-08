@@ -14,7 +14,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.feature_selection import SelectKBest
 from sklearn.linear_model import (ElasticNet, LogisticRegression,
                                   LogisticRegressionCV, Ridge)
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.metrics import get_scorer, log_loss, roc_auc_score
 from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
                                      cross_val_predict, cross_validate,
                                      train_test_split)
@@ -772,6 +772,7 @@ class GreedyBTTDA(BTTDA):
         truncate=True,
         n_jobs=None,
         clf=None,
+        scoring="roc_auc",
     ):
         self.hoda_params = hoda_params
         self.verbose = verbose
@@ -782,6 +783,7 @@ class GreedyBTTDA(BTTDA):
         self.truncate = truncate
         self.n_jobs = n_jobs
         self.clf = clf
+        self.scoring = scoring
         super().__init__(
             hoda_params=hoda_params, verbose=verbose, extra_train_info=extra_train_info
         )
@@ -869,13 +871,10 @@ class GreedyBTTDA(BTTDA):
                     fold_Xt = fold_bttda[fold].transform(X)
 
                     clf = clone(self.clf).fit(fold_Xt[train_idc], y[train_idc])
-                    y_pred = clf.predict_proba(fold_Xt)
-                    train_score = roc_auc_score(
-                        y[train_idc], y_pred[train_idc], multi_class="ovr"
-                    )
-                    val_score = roc_auc_score(
-                        y[val_idc], y_pred[val_idc], multi_class="ovr"
-                    )
+                    y_pred = clf.predict(fold_Xt)
+                    score_func = get_scorer(self.scoring)._score_func
+                    train_score = score_func(y[train_idc], y_pred[train_idc])
+                    val_score = score_func(y[val_idc], y_pred[val_idc])
                     val_scores[fold, ri] = val_score
                     res = dict(
                         block=b,
@@ -886,9 +885,7 @@ class GreedyBTTDA(BTTDA):
                         n_features=fold_Xt.shape[-1],
                     )
                     if test:
-                        res["test_score"] = roc_auc_score(
-                            y[test_idc], y_pred[test_idc], multi_class="ovr"
-                        )
+                        res["test_score"] = score_func(y[test_idc], y_pred[test_idc])
                     self.model_select_info_.append(res)
 
                 if self.verbose:
