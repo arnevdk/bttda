@@ -871,7 +871,7 @@ class GreedyBTTDA(BTTDA):
                     fold_Xt = fold_bttda[fold].transform(X)
 
                     clf = clone(self.clf).fit(fold_Xt[train_idc], y[train_idc])
-                    if score_func == 'roc_auc':
+                    if self.scoring == 'roc_auc':
                         y_pred = clf.decision_function(fold_Xt)
                     else:
                         y_pred = clf.predict(fold_Xt)
