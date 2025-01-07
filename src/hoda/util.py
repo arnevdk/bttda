@@ -74,6 +74,9 @@ def trunc_eigh(
     # idc = np.argsort(w)
     # w = w[idc]
     # v = v[:, idc]
+    idc = np.argsort(tl.abs(w))
+    w = w[idc]
+    v = v[:, idc]
     return v, w
 
 

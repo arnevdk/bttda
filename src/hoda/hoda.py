@@ -1,7 +1,7 @@
 import itertools
 import math
-import pdb
 
+import ipdb
 import numpy as np
 import pandas as pd
 import tensorly as tl
@@ -122,7 +122,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         shrinkage="lw",
         toeplitz=None,
         taper=False,
-        obj="rt",
+        obj="tr",
         solver="lanczos",
         verbose=False,
         solver_params=None,
@@ -147,11 +147,18 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.delta = delta
         self.forward = forward
 
+    def _validate(self, X, y):
+        if not tl.is_tensor(X):
+            raise ValueError("X should be a tensorly tensor")
+
+        if self.delta is not None and (self.delta >= 1.0 or self.delta < 0):
+            raise ValueError("delta should lie in [0, 1)")
+
+        if self.solver == "svd" and self.obj == "tr":
+            raise ValueError("svd solver cannot be used with trace-ratio objective")
+
     def fit(self, X, y, classes=None, class_counts=None):
-        assert tl.is_tensor(X)
-        # Convert to tensor
-        # if not tl.is_tensor(X):
-        #    X = tl.tensor(X)
+        self._validate(X, y)
         # Calculate means, centering and classes once (slow on GPU)
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -159,6 +166,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         else:
             self.classes_ = classes
         self.means_, X_centered = center(X, y, self.classes_)
+
         # Fit backward model
         self.fit_backward(
             X,
@@ -168,6 +176,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             classes=self.classes_,
             class_counts=class_counts,
         )
+
         # Fit forward model
         if self.forward:
             self.fit_forward(X, y, X_centered=X_centered)
@@ -183,15 +192,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         class_counts=None,
         sample_weights=None,
     ):
-        assert tl.is_tensor(X)
+        self._validate(X, y)
+
         # TODO: calculate train info for initialization
-        # Convert to tensor
-        # if not tl.is_tensor(X):
-        #    X = tl.tensor(X)
         n_samples, *shape = X.shape
         order = len(shape)
 
-        # Determine classses  and center
+        # Determine classes  and center
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
             class_counts = tl.tensor(class_counts)
@@ -239,8 +246,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Iteratively find projections
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
-            iterator = tqdm(iterator)
-            iterator.set_description(f"Backward HODA model rank={self.rank_}")
+            iterator = tqdm(iterator, position=0, leave=True)
         for self.iter_ in iterator:
             converged = True
             for k in range(order):
@@ -293,23 +299,26 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     largest=largest,
                     solver_params=solver_params,
                 )
+
+                # Determine rank
+                # TODO might be more efficient to determine rank with eigvalsh
+                # first before finding eigenvecs
                 if self.delta is not None:
-                    idc = np.argsort(w)
-                    w = w[idc]
-                    u = u[:, idc]
-                    u = u[:, tl.cumsum(w) / tl.sum(w) > self.delta]
+                    # !! assumes increasing order of eigvals
+                    u = u[:, tl.cumsum(tl.abs(w)) / tl.sum(tl.abs(w)) > self.delta]
                 new_rank = u.shape[-1]
+
                 # Re-orthogonalize
                 if self.solver == "lobpcg":
                     solver_params["init"] = u
                 u, w = trunc_eigh(
-                    u @ u.T @ (scatter_t[k]) @ u @ u.T,
-                    # rank=self.rank_[k],
+                    u @ u.T @ scatter_t[k] @ u @ u.T,
                     rank=new_rank,
                     method=self.solver,
                     largest=largest,
                     solver_params=solver_params,
                 )
+
                 # Flip sign
                 sign = tl.sign(u[0, :])
                 u *= sign
@@ -344,6 +353,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     train_info_row.update(backward_stats(Xt, y))
                 self.train_info_["backward"].append(train_info_row)
 
+            if self.verbose:
+                iterator.set_description(f"Backward HODA model rank={self.rank_}")
             # Exit if converged
             if converged:
                 break
@@ -354,7 +365,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         }
 
     def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
-        assert tl.is_tensor(X)
+        self._validate(X, y)
+
         n_samples, *shape = X.shape
         order = len(shape)
 
@@ -403,7 +415,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Calculate forward model
         iterator = range(0, self.max_iter)
         if self.verbose:
-            iterator = tqdm(iterator)
+            iterator = tqdm(iterator, position=0, leave=True)
             iterator.set_description("Forward model ")
         update = np.inf
 
@@ -430,7 +442,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     cov_g, shrink = mode_scatter(
                         G,
                         k,
-                        shrinkage=self.shrinkage,
+                        # shrinkage=self.shrinkage,
+                        shrinkage=0,
                         assume_centered=True,
                     )
                     ap = tl.solve(cov_g.T, cov_cross.T).T
@@ -949,3 +962,26 @@ class GreedyBTTDA(BTTDA):
         idc = df_agg.groupby("block").idxmax()
         df_select = self.model_select_info_.loc[idc]
         return df_select
+
+
+class AutoBTTDA(BTTDA):
+    def __init__(
+        self,
+        delta=None,
+        n_blocks=1,
+        hoda_params=None,
+        extra_train_info=False,
+        verbose=False,
+        forward=True,
+    ):
+        self.delta = delta
+        self.n_blocks = n_blocks
+        self.hoda_params = hoda_params
+        self.verbose = verbose
+        self.extra_train_info = extra_train_info
+        self.forward = forward
+
+    def fit(self, X, y, **fit_params):
+        self.ranks = [None] * self.n_blocks
+        self.hoda_params["delta"] = self.delta
+        return super().fit(X, y, **fit_params)

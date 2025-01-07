@@ -1,0 +1,20 @@
+FROM localhost/tbx-base:f37-py312
+# Install CUDA
+RUN dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora37/x86_64/cuda-fedora37.repo \
+    && dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora37/x86_64/cuda-fedora37.repo \
+    && dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora37/x86_64/cuda-fedora37.repo \
+    && dnf clean all \
+    && dnf -y install \
+    	cuda-toolkit-12-3 \
+    	libcutensor2 \
+	libcutensor-devel \
+	libcutensor-doc \
+    && dnf -y module install nvidia-driver:open-dkms
+# Install cupy
+RUN /usr/local/share/venv/bin/pip install --no-cache-dir --upgrade cupy-cuda12x array_api_compat\
+	&& /usr/local/share/venv/bin/python -m cupyx.tools.install_library --cuda 12.x --library cutensor
+RUN chown -R 1000:1000 /usr/local/share/venv
+# Setup environment
+ENV TENSORLY_BACKEND=cupy
+ENV CUPY_ACCELERATORS=cub,cutensor
+ENV SCIPY_ARRAY_API=1

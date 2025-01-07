@@ -12,11 +12,14 @@ setup(
         "experiments": [
             # "mne<=1.6.1",
             # "pyyaml<5.4",
-            "moabb==1.1.0",
-            "matplotlib<3.9",
-            "jupyter",
-            "seaborn",
-            "numpy<1.24",
+            # "moabb==1.1.0",
+            # "matplotlib<3.9",
+            # "jupyter",
+            # "seaborn",
+            # "numpy<1.24",
+            "moabb",
+            "jupyter<4",
+            "plotly",
         ]
     },
 )

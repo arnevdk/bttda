@@ -94,6 +94,7 @@ def lanczos_cupy(A, B=None, rank=None, largest=True, force_spd=False, init=None)
         C = cupyx.scipy.linalg.solve_triangular(L, Y, lower=True)
     else:
         C = A
+
     w, v = cupy.linalg.eigh(C)
     if B is not None:
         v = cupyx.scipy.linalg.solve_triangular(L.T, v, lower=False)
