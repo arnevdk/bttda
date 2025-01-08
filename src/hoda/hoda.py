@@ -734,13 +734,15 @@ class BTTDA(BaseEstimator, TransformerMixin):
     def n_params_(self):
         return sum([b.n_params_ for b in self.blocks_])
 
-    def transform(self, X, y=None, blocks=None, return_err=False, **_):
+    def transform(self, X, y=None, blocks=None,n_blocks=None, return_err=False, **_):
         assert tl.is_tensor(X)
         err = copy(X)
         n_samples, *_ = X.shape
         Xt = []
         if blocks is None:
             blocks = self.blocks_
+        if n_blocks is not None:
+            blocks = blocks[:n_blocks]
         for b, block in enumerate(blocks):
             Xtb = block.transform(err, y)
             Xt.append(Xtb.reshape(n_samples, -1))
