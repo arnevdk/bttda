@@ -1,3 +1,4 @@
+
 # g = copy(Xt_centered)
 # for k in range(order):
 #    modes = [kk + 1 for kk in range(k + 1, order)]
@@ -302,3 +303,54 @@
 #            self.aps_[k] = ap
 
 #        converged = update < self.tol and converged
+
+## COPIED FROM HODA.PY
+
+
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X, k + 1)
+                    # ap, residuals, rank, s = lstsq(Gk.T, Xk.T)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    # modes = range(1, order + 1)
+                    # G = tl.tenalg.multi_mode_dot(
+                    #    X, self.weights_, modes=modes, transpose=True, skip=k
+                    # )
+                    # modes = [0] + [kk + 1 for kk in range(order) if kk != k]
+                    # cov_cross = tl.tensordot(G, Xt, axes=(modes, modes))
+                    # cov, shrink = mode_scatter(
+                    #    Xt,
+                    #    k,
+                    #    shrinkage=self.shrinkage,
+                    #    assume_centered=True,
+                    # )
+                    # ap = tl.solve(cov.T, cov_cross.T).T
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xtk = tl.unfold(Xt, k + 1)
+                    # ap, *_ = lstsq(Xtk.T, Gk.T)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    # G = tl.tenalg.mode_dot(X, self.weights_[k].T, mode=k + 1)
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X, k + 1)
+                    # ap, *_ = lstsq(Gk.T, Xk.T)
+                    # ap = ap.T
+                    # shrink = 0
+
+                    # w = []
+                    # for kk in range(order):
+                    #    if k == kk:
+                    #        w.append(self.weights_[kk])
+                    #    else:
+                    #        w.append(self.weights_[kk] @ self.aps_[kk].T)
+                    # modes = range(1, order + 1)
+                    # G = tl.tenalg.multi_mode_dot(X, w, modes=modes, transpose=True)
+                    # Gk = tl.unfold(G, k + 1)
+                    # Xk = tl.unfold(X, k + 1)
+                    # ap, *_ = lstsq(Gk.T, Xk.T)
+                    # ap = ap.T
+                    # shrink = 0
+
+ 
