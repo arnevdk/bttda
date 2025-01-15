@@ -7,21 +7,11 @@ import numpy as np
 import tensorly as tl
 from sklearn.base import BaseEstimator
 
-from hoda.backend import toeplitz, var
-
-try:
-    import cupy
-except ImportError:
-    pass
-
-eyes = dict()
-
 
 def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
 ):
     """Calculate the scatter matrix along a given tensor mode"""
-    global eyes
 
     n_samples, *shape = X.shape
     order = len(shape)
@@ -59,10 +49,7 @@ def mode_scatter(
         raise NotImplementedError
     elif shrinkage == "loocv":
         raise NotImplemented
-    # Shrink
-    # if not n_features in eyes.keys():
-    #    eyes[n_features] = tl.eye(n_features)
-    # structured = eyes[n_features]
+
     structured = tl.eye(n_features)
     structured *= tl.trace(scatter) / n_features
     scatter = (1 - shrinkage) * scatter + shrinkage * structured
@@ -78,7 +65,7 @@ def force_toeplitz(A, taper=False):
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper
-    return toeplitz(toep)
+    return scipy.linalg.toeplitz(toep)
 
 
 def ledoit_wolf_shrinkage(
@@ -197,79 +184,3 @@ def oas(emp_cov, n_samples):
     shrinkage = min(shrinkage, 1)
     shrinkage = max(shrinkage, 0)
     return shrinkage
-
-
-def pvl_perm(X, n, m):
-    Xs = np.zeros((n**2, m**2))
-    for i in range(n):
-        for j in range(n):
-            block_ij = X[i * m : (i + 1) * m, j * m : (j + 1) * m]
-            Xs[i * n + j, :] = block_ij.flatten()
-    return Xs
-
-
-def pvl_perm_inv(Xs, n, m):
-    X = np.zeros((n * m, n * m))
-    for i in range(n):
-        for j in range(n):
-            row_ij = Xs[i * n + j, :]
-            X[i * m : (i + 1) * m, j * m : (j + 1) * m] = row_ij.reshape((m, m))
-    return X
-
-
-class KroneckerCovariance(BaseEstimator):
-    def __init__(self, max_iter=1000, tol=1e-8, assume_centered=False, estimator="mle"):
-        self.max_iter = max_iter
-        self.tol = tol
-        self.assume_centered = assume_centered
-        self.estimator = estimator
-
-    def fit(self, X, Y=None, y=None):
-        if X is None:
-            X = Y
-        n_samples, *X_shape = X.shape
-        _, *Y_shape = Y.shape
-        order = len(X.shape[1:])
-
-        # Initialize
-        transforms = [None] * order
-        covs = [None] * order
-        for k in range(order):
-            transforms[k] = tl.zeros((X_shape[k], Y_shape[k]))
-            transforms[k][: Y_shape[k], :] = tl.eye(Y_shape[k])
-            covs[k] = transforms[k].copy()
-
-        # Find transformations
-        for self.iter_ in range(1, self.max_iter + 1):
-            update = 0
-            for k in range(order):
-                modes = range(1, order + 1)
-                X_proj = tl.tenalg.multi_mode_dot(
-                    X, transforms, modes, skip=k, transpose=True
-                )
-                modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                cov = tl.tensordot(X_proj, Y, axes=[modes, modes])
-                cov /= tl.mean(tl.diag(cov))
-                update += tl.norm(covs[k] - cov)
-                covs[k] = cov
-                if self.estimator == "mle":
-                    transforms[k] = cupy.linalg.pinv(cov).T
-                elif self.estimator == "map":
-                    transforms[k] = cov
-                else:
-                    raise NotImplementedError
-            if update < self.tol:
-                break
-
-        self.covs_ = [None] * order
-        # Find scaled covariance
-        for k in range(order):
-            modes = range(1, order + 1)
-            X_proj = tl.tenalg.multi_mode_dot(
-                X, transforms, modes, skip=k, transpose=True
-            )
-            modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-            self.covs_[k] = tl.tensordot(X_proj, Y, axes=[modes, modes])
-            self.covs_[k] /= n_samples * math.prod(X_shape) / X_shape[k] - 1
-
-        return self

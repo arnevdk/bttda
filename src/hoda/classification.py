@@ -7,7 +7,6 @@ from kneed import KneeLocator
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.preprocessing import FunctionTransformer
 
-from hoda.backend import std
 from hoda.tensorize import vec
 from hoda.util import f_oneway
 
@@ -20,7 +19,7 @@ except ImportError:
 class ZScore(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         self.mean_ = tl.mean(X, axis=0)
-        self.std_ = std(X, axis=0)
+        self.std_ = np.std(X, axis=0)
         return self
 
     def transform(self, X, y=None):

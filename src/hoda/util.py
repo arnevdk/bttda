@@ -1,11 +1,10 @@
 import math
-import warnings
 
 import numpy as np
+import scipy.linalg
 import tensorly as tl
 from numpy.linalg import LinAlgError
 
-from hoda.backend import fdtrc, lanczos, lobpcg, pinv
 from hoda.cov import mode_scatter
 
 try:
@@ -18,66 +17,29 @@ def norm_fro(A):
     return tl.sqrt(tl.sum(A**2))
 
 
-def trunc_eigh(
-    A,
-    B=None,
-    rank=None,
-    largest=True,
-    method="lanczos",
-    solver_params=None,
+def solve_gevdh(
+    A, B=None, solver="lanczos", rank=None, eigvals_only=False, **solver_params
 ):
-    """
-
-    SVD eigensolver can only be used if  B^-1@A is semi-positive definite
-    """
-    solver_params = solver_params or dict()
-    if method == "lanczos":
-        try:
-            v, w = lanczos(A, B=B, rank=rank, largest=largest, **solver_params)
-            # if np.any(np.isnan(v)):
-            #    raise LinAlgError
-        except LinAlgError as e:
-            warnings.warn(f"lanczos failed with error {e}")
-            v, w = lanczos(
-                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
-            )
-
-    elif method == "svd":
-        solver_params.setdefault("method", "truncated_svd")
-        if largest:
-            solver_params["n_eigenvecs"] = rank
-        else:
-            solver_params["n_eigenvecs"] = None
-        if B is None:
-            v, w, _ = tl.tenalg.svd_interface(A, **solver_params)
-        else:
-            v, w, _ = tl.tenalg.svd_interface(tl.solve(B, A), **solver_params)
-        if not largest:
-            w = w[-rank:]
-            v = v[:, -rank:]
-
-    elif method == "lobpcg":
-        init = solver_params.pop("init", tl.eye(A.shape[0]))
-        init = init[:, :rank]
-        try:
-            w, v = lobpcg(A, init, B=B, largest=largest, **solver_params)
-        except (AttributeError, LinAlgError, Exception, ValueError) as e:
-            warnings.warn(
-                f"lobpcg failed with error {e}, falling back to lanczos solver with SPD constraint"
-            )
-            v, w = lanczos(
-                A, B=B, rank=rank, largest=largest, force_spd=True, **solver_params
-            )
-    else:
-        raise ValueError("Solver must be one of ['lanczos', 'lobpcg', 'svd']")
-    # sort
-    # idc = np.argsort(w)
-    # w = w[idc]
-    # v = v[:, idc]
-    idc = np.argsort(tl.abs(w))
-    w = w[idc]
-    v = v[:, idc]
-    return v, w
+    if solver == "lanczos":
+        subset = None
+        n = A.shape[-1]
+        if rank is not None:
+            subset = [n - rank, n - 1]
+        res = scipy.linalg.eigh(
+            A,
+            b=B,
+            check_finite=False,
+            subset_by_index=subset,
+            eigvals_only=eigvals_only,
+            **solver_params
+        )
+        if isinstance(res, tuple):
+            res = (res[1], res[0])
+    if solver == "svd":
+        raise NotImplementedError
+    if solver == "lobpcg":
+        raise NotImplementedError
+    return res
 
 
 def center(X, y, classes=None):
@@ -154,8 +116,12 @@ def f_multiway(
         )
         means_flat = tl.unfold(means, 0)
         scatter_b, _ = mode_scatter(means_flat, 0, assume_centered=False, shrinkage=0)
-        _, w = trunc_eigh(
-            scatter_b, scatter_w, rank=X_centered_flat.shape[-1], method="lanczos"
+        w = solve_gevdh(
+            scatter_b,
+            scatter_w,
+            rank=X_centered_flat.shape[-1],
+            solver="lanczos",
+            eigvals_only=True,
         )
         F = tl.sum(w)
     else:
