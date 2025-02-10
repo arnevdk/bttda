@@ -1,18 +1,15 @@
 import math
+import warnings
 
 import numpy as np
 import tensorly as tl
 import tensorly.decomposition
-import tensorly.tenalg
-from sklearn.base import (BaseEstimator, ClassifierMixin, TransformerMixin,
-                          clone)
+from numpy.linalg import LinAlgError
+from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.feature_selection import SelectKBest
-from sklearn.linear_model import (ElasticNet, LogisticRegression,
-                                  LogisticRegressionCV, Ridge)
-from sklearn.metrics import get_scorer, log_loss, roc_auc_score
+from sklearn.metrics import get_scorer, log_loss
 from sklearn.model_selection import (GridSearchCV, StratifiedKFold,
-                                     cross_val_predict, cross_validate)
+                                     cross_val_predict)
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -393,7 +390,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                         shrinkage=0,
                         assume_centered=True,
                     )
-                    ap = tl.solve(cov_g.T, cov_cross.T).T
+                    try:
+                        ap = tl.solve(cov_g.T, cov_cross.T).T
+                    except LinAlgError as e:
+                        warnings.warn(str(e), category=RuntimeWarning)
+                        ap = tl.zeros_like(self.aps_[k])
+
                     update = tl.norm(ap - self.aps_[k])
                     update /= tl.norm(self.aps_[k])
 
