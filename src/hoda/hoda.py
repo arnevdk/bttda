@@ -1,4 +1,5 @@
 import math
+from numpy.linalg import LinAlgError
 
 import numpy as np
 import tensorly as tl
@@ -315,8 +316,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 converged = update < self.tol and converged
 
-                # Update weights
-                # u[np.isnan(u)] = 0
+                if np.any(np.isnan(u)):
+                    raise LinAlgError('NaN in weights')
+
+
                 self.weights_[k] = u
 
                 # Store mode training information
@@ -399,6 +402,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 # if k < order-1:
                 #    ap *= tl.sign(ap[0,0])
+                if np.any(np.isnan(ap)):
+                    raise LinAlgError('NaN in aps')
                 self.aps_[k] = ap
                 converged = update < self.tol and converged
 
@@ -561,41 +566,46 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
         err = tl.copy(X)
         for b, rank in enumerate(self.ranks):
-            if blocks is not None and b < len(blocks):
-                # TODO error if ranks are not equal
-                block = blocks[b]
-            else:
-                if self.verbose:
-                    print(f"Fitting block {b+1}/{len(self.ranks)}...")
-                hoda_params["rank"] = rank
-                block = HODA(**hoda_params)
-                block.fit_backward(
-                    err,
-                    y,
-                    classes=self.classes_,
-                    class_counts=class_counts,
-                    # sample_weights=weight,
-                )
-            self.blocks_.append(block)
-            G = block.transform(err)
-            if b < len(self.ranks) - 1 or self.forward:
-                if not hasattr(block, "aps_"):
-                    block.fit_forward(err, y, Xt=G)
-                err -= block.inv_transform(G)
-            # Calculate train info
-            train_info_row = dict()
-            train_info_row["block"] = self.n_blocks_
-            train_info_row["rank"] = block.rank_
-
-            Xt = self.transform(X)
-            if self.extra_train_info:
-                if b < len(self.ranks) - 1 or self.forward:
-                    X_approx = self.inv_transform(Xt)
+            try:
+                if blocks is not None and b < len(blocks):
+                    # TODO error if ranks are not equal
+                    block = blocks[b]
                 else:
-                    X_approx = np.zeros_like(X)
-                train_info_row.update(backward_stats(Xt, y))
-                train_info_row.update(forward_stats(X, Xt, X_approx, y))
-            self.train_info_.append(train_info_row)
+                    if self.verbose:
+                        print(f"Fitting block {b+1}/{len(self.ranks)}...")
+                    hoda_params["rank"] = rank
+                    block = HODA(**hoda_params)
+                    block.fit_backward(
+                        err,
+                        y,
+                        classes=self.classes_,
+                        class_counts=class_counts,
+                        # sample_weights=weight,
+                    )
+                self.blocks_.append(block)
+                G = block.transform(err)
+                if b < len(self.ranks) - 1 or self.forward:
+                    if not hasattr(block, "aps_"):
+                        block.fit_forward(err, y, Xt=G)
+                    err -= block.inv_transform(G)
+                # Calculate train info
+                train_info_row = dict()
+                train_info_row["block"] = self.n_blocks_
+                train_info_row["rank"] = block.rank_
+
+                Xt = self.transform(X)
+                if self.extra_train_info:
+                    if b < len(self.ranks) - 1 or self.forward:
+                        X_approx = self.inv_transform(Xt)
+                    else:
+                        X_approx = np.zeros_like(X)
+                    train_info_row.update(backward_stats(Xt, y))
+                    train_info_row.update(forward_stats(X, Xt, X_approx, y))
+                self.train_info_.append(train_info_row)
+            except LinAlgError:
+                break
+            
+
 
         # Convert train info to list dict
         self.train_info_ = {
