@@ -9,7 +9,19 @@ from mne.filter import filter_data
 from mne.time_frequency import tfr_array_morlet
 from sklearn.base import TransformerMixin
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
+import scipy.signal
 
+import numpy as np
+import scipy.signal
+from mne.filter import resample
+
+def filter_hilbert_stf(X):
+    ipdb.set_trace()
+    X = X.transpose((0,3,1,2))
+    X = np.log(np.abs(scipy.signal.hilbert(X)))
+    X = resample(X, down=sfreq/target_sfreq, n_jobs=-1, verbose=True)
+    X = tl.tensor(X)
+    return X
 
 def vec(X, y=None, extra=None):
     x = X.reshape((X.shape[0], -1))
@@ -41,10 +53,11 @@ def stf_tensor(
     baseline_params=None,
     l_freq=8,
     h_freq=32,
-    bin_freq=4,
-    n_freqs=4,
+    bin_freq=32,
+    n_freqs=8,
     normalize=True,
     log=True,
+    return_freqs=False,
 ):
     # TFR morlet
     # if morlet_params is None:
@@ -81,7 +94,11 @@ def stf_tensor(
         mu = X_tfr.mean(axis=(0, 3))[np.newaxis, :, :, np.newaxis]
         sigma = X_tfr.std(axis=(0, 3))[np.newaxis, :, :, np.newaxis]
         X_tfr = (X_tfr - mu) / sigma
-    return X_tfr
+
+    res = X_tfr
+    if return_freqs:
+        res = (X_tfr, freqs)
+    return res
 
 
 def crop(X, begin=0, end=None, sfreq=None, tmin=None):
@@ -121,6 +138,11 @@ class Tensorize(TransformerMixin):
             X = tl.tensor(X)
         return X
 
+def envelope(X, sfreq=250, target_sfreq=32):
+    X = X.transpose((0,3,1,2))
+    X = np.log(np.abs(scipy.signal.hilbert(X)))
+    X = resample(X, down=sfreq/target_sfreq, n_jobs=-1, verbose=True)
+    return X
 
 def Crop(**params):
     return FunctionTransformer(crop, kw_args=params)

@@ -1,0 +1,4 @@
+,score,time,samples,subject,session,channels,n_sessions,dataset,pipeline
+0,0.8414062,103.8389,320.0,17,0,30,1,ErpCore2021-N170,PARAFACDA
+1,0.77213544,713.7298,320.0,17,0,30,1,ErpCore2021-N170,BTTDA
+2,0.8072917,30.706345,320.0,17,0,30,1,ErpCore2021-N170,HODA

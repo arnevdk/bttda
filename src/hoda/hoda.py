@@ -1,6 +1,8 @@
 import math
+import pdb
 from numpy.linalg import LinAlgError
 import warnings
+
 
 import numpy as np
 import tensorly as tl
@@ -17,7 +19,7 @@ from tqdm import tqdm
 
 from hoda.cov import mode_scatter
 from hoda.tensorize import Vectorize, vec
-from hoda.util import center, f_multiway, lstsq_ridge, r_squared, solve_gevdh
+from hoda.util import center, ridge_regression, solve_gevdh, flip_signs
 
 # from statsmodels.discrete.discrete_model import Logit
 # from tqdm.notebook import tqdm
@@ -38,7 +40,7 @@ def obj_rt(scatter_b, scatter_w, _):
     return scatter_b, scatter_w
 
 
-def obj_tr(scatter_b, scatter_w, u, psi=1):
+def obj_tr(scatter_b, scatter_w, u):
     """Trace ratio objective Tr(uT Sb u)/Tr(uT Sw u).
 
     Phan, A. H., & Cichocki, A. (2010).
@@ -49,8 +51,12 @@ def obj_tr(scatter_b, scatter_w, u, psi=1):
     vs. ratio trace for dimensionality reduction. In 2007 IEEE Conference on
     Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
     """
-    phi = tl.trace(u.T @ scatter_b @ u) / tl.trace(u.T @ scatter_w @ u)
-    A = scatter_b - psi * phi * scatter_w
+    scatter_b_t = u.T @ scatter_b @ u
+    tr_scatter_b_t = tl.trace(scatter_b_t)
+    scatter_w_t = u.T @ scatter_w @ u
+    tr_scatter_w_t = tl.trace(scatter_w_t)
+    phi = tr_scatter_b_t / tr_scatter_w_t
+    A = scatter_b - phi * scatter_w
     return A, None
 
 
@@ -101,14 +107,14 @@ OBJECTIVES = dict(
     sr=obj_sr,
 )
 
-
 class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def __init__(
         self,
         max_iter=256,
-        tol=1e-8,
+        tol=1e-6,
         rank=None,
         shrinkage="lw",
+        refit_shrinkage=False,
         toeplitz=None,
         taper=False,
         obj="tr",
@@ -116,14 +122,14 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         verbose=False,
         solver_params=None,
         extra_train_info=False,
-        random_state=None,
         theta=None,
         forward=False,
     ):
         self.max_iter = max_iter
-        self.tol = tol
+        self.tol=tol
         self.rank = rank
         self.shrinkage = shrinkage
+        self.refit_shrinkage=refit_shrinkage
         self.toeplitz = toeplitz
         self.obj = obj
         self.solver = solver
@@ -131,7 +137,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.solver_params = solver_params
         self.extra_train_info = extra_train_info
         self.taper = taper
-        self.random_state = random_state
         self.theta = theta
         self.forward = forward
 
@@ -170,6 +175,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.fit_forward(X, y, X_centered=X_centered)
         return self
 
+    def _setup_tl(self):
+        tl.tenalg.set_backend('einsum')
+        tl.plugins.use_opt_einsum()
+
     def fit_backward(
         self,
         X,
@@ -178,9 +187,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         means=None,
         classes=None,
         class_counts=None,
-        sample_weights=None,
     ):
+        self._setup_tl()
         self._validate(X, y)
+
 
         # TODO: calculate train info for initialization
         n_samples, *shape = X.shape
@@ -201,7 +211,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.train_info_ = dict(backward=[])
 
         # Initialize backward projections and covariances
-        self._init(X)
+        #self._init(X,y, classes=classes, class_counts=class_counts, X_centered=X_centered, means=means)
+        self._init_backward(X)
         self.scatter_w_ = [None] * order
 
         # Determine solver parameters
@@ -217,21 +228,21 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Calculate total scatter
         scatter_t = [None] * order
         for k in range(order):
-            scatter_w, _ = mode_scatter(
+            scatter_w, shrinkage = mode_scatter(
                 X_centered,
                 k,
                 assume_centered=True,
                 shrinkage=self.shrinkage,
                 toeplitz=self.toeplitz,
                 taper=self.taper,
-                weights=tl.sqrt(sample_weights) if sample_weights is not None else None,
             )
             scatter_b, _ = mode_scatter(
-                self.means_, k, weights=tl.sqrt(class_counts), shrinkage=0
+                self.means_, k, weights=class_counts, shrinkage=0
             )
             scatter_t[k] = scatter_w + scatter_b
 
         # Iteratively find projections
+        shrinkages=[None]*order
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
             iterator = tqdm(iterator, position=0, leave=True)
@@ -252,6 +263,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 else:
                     shrinkage = self.shrinkage
 
+                if not self.refit_shrinkage and shrinkages[k] is not None:
+                    shrinkage = shrinkages[k]
+
                 scatter_w, shrinkage = mode_scatter(
                     X_centered_proj,
                     k,
@@ -260,6 +274,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     toeplitz=self.toeplitz,
                     taper=self.taper,
                 )
+                shrinkages[k] = float(shrinkage)
+
 
                 # Calculate between class scatter
                 means_centered_proj = tl.tenalg.multi_mode_dot(
@@ -268,48 +284,47 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 scatter_b, _ = mode_scatter(
                     means_centered_proj,
                     k,
-                    weights=tl.sqrt(class_counts),
+                    weights=class_counts,
                     shrinkage=0,
                     assume_centered=True,
                 )
 
                 # Solve
+                u = self.weights_[k]
                 A, B = OBJECTIVES[self.obj](
-                    scatter_b, scatter_w + scatter_b, self.weights_[k]
+                    scatter_b, scatter_w, self.weights_[k],
                 )
-                if self.solver == "lobpcg":
-                    solver_params["init"] = tl.copy(self.weights_[k])
+
+                                
                 u, w = solve_gevdh(
                     A,
                     B=B,
                     rank=self.rank_[k],
                     solver=self.solver,
+                    which='LA',
+                    init=tl.copy(self.weights_[k]),
                     **solver_params,
                 )
-
                 # Re-orthogonalize
-                if self.solver == "lobpcg":
-                    solver_params["init"] = u
                 u, w = solve_gevdh(
                     u @ u.T @ scatter_t[k] @ u @ u.T,
                     rank=self.rank_[k],
                     solver=self.solver,
+                    which='LA',
+                    init=tl.copy(self.weights_[k]),
                     **solver_params,
                 )
 
-                # Flip signs
-                sign = tl.sign(u[0, :])
-                sign[sign == 0] = 1
-                u *= sign
-                # Normalize
-                u = u / tl.norm(u, axis=0)
 
+                
                 # Calculate update and check convergence
                 if u.shape[-1] != self.weights_[k].shape[-1]:
                     update = np.inf
                 else:
-                    update = tl.norm(u - self.weights_[k])
-                    update /= tl.norm(self.weights_[k])
+                    old = flip_signs(self.weights_[k])
+                    new = flip_signs(u)
+                    update = tl.norm(new - old)
+                    update /= tl.norm(old)
 
                 converged = update < self.tol and converged
 
@@ -319,13 +334,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 self.weights_[k] = u
 
+
                 # Store mode training information
                 train_info_row = dict(
                     iteration=self.iter_,
-                    mode=k,
+                    mode=k+1,
+                    flip = (self.iter_-1)*order+k+1,
                     update=float(update),
                     shrinkage=float(shrinkage),
-                    objective=float(tl.sum(w)),
+                    objective=float(tl.sum(tl.abs(w))),
                 )
                 self.scatter_w_[k] = scatter_w
                 if self.extra_train_info:
@@ -343,64 +360,50 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             k: [dic[k] for dic in self.train_info_["backward"]]
             for k in self.train_info_["backward"][0]
         }
+        if not converged:
+            warnings.warn('Maximum number of iterations reached without convergence')
 
     def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
+        self._setup_tl()
+        self._setup_tl()
         self._validate(X, y)
 
         n_samples, *shape = X.shape
         order = len(shape)
 
-        # Project
 
+        # Project
         if Xt is None:
             Xt = self.transform(X)
 
         # Initialize
-        self.aps_ = [tl.copy(w) for w in self.weights_]
+        self._init_forward()
         self.train_info_["forward"] = []
 
         # Calculate forward model
-        iterator = range(0, self.max_iter)
+        iterator = range(1, self.max_iter)
         if self.verbose:
             iterator = tqdm(iterator, position=0, leave=True)
             iterator.set_description("Forward model ")
         update = np.inf
 
+        shrinkages = [None]*order
         for i in iterator:
             converged = True
             for k in range(order):
-                # Initialize or calculate activation pattern
-                if not i:
-                    ap = tl.copy(self.weights_[k])
-                    # ap = tl.eye(shape[k])[:, : self.rank_[k]]
-                    # ap = tl.random.base.random_tensor((shape[k], self.rank_[k]))
-                    # ap, _, _ = tl.tenalg.svd_interface(
-                    #    tl.unfold(X, k + 1),
-                    #    method="truncated_svd",
-                    #    n_eigenvecs=self.rank_[k],
-                    # )
-                    update = np.inf
-                    shrink = np.nan
-                else:
-                    modes = range(1, order + 1)
-                    G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
-                    modes = [0] + [kk + 1 for kk in range(order) if kk != k]
-                    cov_cross = tl.tensordot(X, G, axes=(modes, modes))
-                    cov_g, shrink = mode_scatter(
-                        G,
-                        k,
-                        # shrinkage=self.shrinkage,
-                        shrinkage=0,
-                        assume_centered=True,
-                    )
-                    try:
-                        ap = tl.solve(cov_g.T, cov_cross.T).T
-                    except LinAlgError as e:
-                        warnings.warn(str(e), category=RuntimeWarning)
-                        ap = tl.zeros_like(self.aps_[k])
+                # Partiallu project core tensor 
+                modes = range(1, order + 1)
+                G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
+                # Regress actvation pattern
+                Xk = tl.unfold(X,k+1)
+                Gk = tl.unfold(G,k+1)
+                # TODO: regularization
+                lambda_=0
+                ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
 
-                    update = tl.norm(ap - self.aps_[k])
-                    update /= tl.norm(self.aps_[k])
+                # Calculate update
+                update = tl.norm(ap - self.aps_[k])
+                update /= tl.norm(self.aps_[k])
 
                 # if k < order-1:
                 #    ap *= tl.sign(ap[0,0])
@@ -410,11 +413,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 converged = update < self.tol and converged
 
                 # Store training info
-                train_info_row = dict()
-                train_info_row["iteration"] = i
-                train_info_row["mode"] = k
-                train_info_row["update"] = float(update)
-                train_info_row["shrinkage"] = float(shrink)
+                train_info_row = dict(
+                    iteration=i,
+                    mode=k+1,
+                    flip = (i-1)*order+k+1,
+                    update = float(update),
+                    lambda_ = float(lambda_)
+                )
                 if self.extra_train_info:
                     Xt = self.transform(X)
                     X_approx = self.inv_transform(Xt)
@@ -429,7 +434,126 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             for k in self.train_info_["forward"][0]
         }
 
-    def _init(self, X):
+#    def _init(self, X,y, classes=None, class_counts=None, X_centered=None, means=None):
+#        n_samples, *shape = X.shape
+#        order = len(shape)
+#
+#        # Determine classes  and center
+#        if classes is None or class_counts is None:
+#            self.classes_, class_counts = np.unique(y, return_counts=True)
+#            class_counts = tl.tensor(class_counts)
+#        else:
+#            self.classes_ = classes
+#        if X_centered is None or means is None:
+#            self.means_, X_centered = center(X, y, self.classes_)
+#        else:
+#            self.means_ = means
+#
+#        self.scatter_w_ = [None] * order
+#
+#        # Determine solver parameters
+#        if self.obj not in OBJECTIVES.keys():
+#            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
+#        solver_params = self.solver_params
+#        if solver_params is None:
+#            solver_params = dict()
+#
+#        # Calculate means and center
+#        means_centered = self.means_ - tl.mean(self.means_, axis=0)
+#
+#        # Calculate total scatter
+#        scatter_t = [None] * order
+#        for k in range(order):
+#            scatter_w, _ = mode_scatter(
+#                X_centered,
+#                k,
+#                assume_centered=True,
+#                shrinkage=self.shrinkage,
+#                toeplitz=self.toeplitz,
+#                taper=self.taper,
+#            )
+#            scatter_b, _ = mode_scatter(
+#                self.means_, k, weights=class_counts, shrinkage=0
+#            )
+#            scatter_t[k] = scatter_w + scatter_b
+#
+#        # Initialize rank
+#        rank = self.rank
+#        if isinstance(rank, np.integer) or isinstance(rank, int):
+#            rank = [rank for k in range(order)]
+#        elif rank is None:
+#            rank = [None for k in range(order)]
+#
+#
+#        # Iteratively find projections
+#        self.weights_ = [None]*order
+#        for k in range(order):
+#           if isinstance(self.shrinkage, tuple):
+#               shrinkage = self.shrinkage[k]
+#           else:
+#               shrinkage = self.shrinkage
+#
+#           scatter_w, shrinkage = mode_scatter(
+#               X_centered,
+#               k,
+#               assume_centered=True,
+#               shrinkage=shrinkage,
+#               toeplitz=self.toeplitz,
+#               taper=self.taper,
+#           )
+#
+#
+#           # Calculate between class scatter
+#           scatter_b, _ = mode_scatter(
+#               means_centered,
+#               k,
+#               weights=class_counts,
+#               shrinkage=0,
+#               assume_centered=True,
+#           )
+#
+#           # Solve
+#           A, B = OBJECTIVES[self.obj](
+#               scatter_b, scatter_w, tl.eye(shape[k])
+#           )
+#
+#           u, w = solve_gevdh(
+#               A,
+#               B=B,
+#               rank=shape[k],
+#               solver=self.solver,
+#               which='LA',
+#               **solver_params,
+#           )
+#           # Calculate explained variance
+#           explained_var = tl.cumsum(tl.abs(w))
+#           explained_var /= tl.max(explained_var)
+#           # Determine rank
+#           if rank[k] is None:
+#               rank[k] = np.count_nonzero(explained_var <= self.theta)
+#               rank[k] = max(1, rank[k])
+#           u = u[:, : rank[k]]
+#
+#           # Re-orthogonalize
+#           u, w = solve_gevdh(
+#               u @ u.T @ scatter_t[k] @ u @ u.T,
+#               rank=rank[k],
+#               solver=self.solver,
+#               which='LM',
+#               **solver_params,
+#           )
+#
+#           self.weights_[k] = u
+#
+#        #if self.obj=='rt' and k > 0:
+#        #    for k in range(order):
+#        #        self.weights_[k] = self.weights_[k][:,:min(self.rank_)]
+
+
+
+ 
+
+    def _init_backward(self, X):
         _, *shape = X.shape
         order = X.ndim - 1
         solver_params = self.solver_params
@@ -449,26 +573,25 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             u, w = solve_gevdh(
                 scatter_t,
                 solver=self.solver,
+                which='LA',
                 **solver_params,
             )
-            # Order by decreasing magnitude
-            w = tl.abs(w)
             order = tl.argsort(-w)
             w = w[order]
-            u = u[:, order]
+            u = u[:,order]
             # Calculate explained variance
             explained_var = tl.cumsum(w / tl.sum(w))
             # Determine rank
             if rank[k] is None:
                 rank[k] = np.count_nonzero(explained_var < self.theta) + 1
             u = u[:, : rank[k]]
-            # Flip signs
-            sign = tl.sign(u[0, :])
-            u *= sign
-            # Normalize
-            u = u / tl.norm(u, axis=0)
             # Initialize weights
             self.weights_[k] = u
+
+    def _init_forward(self):
+        self.aps_ = []
+        for w in self.weights_:
+            self.aps_.append(tl.copy(w))
 
     def transform(self, X, y=None):
         assert tl.is_tensor(X)
@@ -501,11 +624,11 @@ def backward_stats(Xt, y):
     stats["F_tr"] = float(f_multiway(Xt, y, method="tr"))
     stats["F_rt"] = float(f_multiway(Xt, y, method="rt"))
 
-    lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
-    Xtf = tl.to_numpy(Xt.reshape((len(Xt), -1)))
-    lda.fit(Xtf, y)
-    y_pred = lda.predict_proba(Xtf)
-    stats["log_loss"] = float(log_loss(y, y_pred))
+    #lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
+    #Xtf = tl.to_numpy(Xt.reshape((len(Xt), -1)))
+    #lda.fit(Xtf, y)
+    #y_pred = lda.predict_proba(Xtf)
+    #stats["log_loss"] = float(log_loss(y, y_pred))
     # _, y_num = np.unique(y, return_inverse=True)
     # logit = Logit(y_num,tl.to_numpy(Xt.reshape(n,p)))
     # logit_res = logit.fit()
@@ -582,21 +705,20 @@ class BTTDA(BaseEstimator, TransformerMixin):
                         y,
                         classes=self.classes_,
                         class_counts=class_counts,
-                        # sample_weights=weight,
                     )
                 self.blocks_.append(block)
                 G = block.transform(err)
                 if b < len(self.ranks) - 1 or self.forward:
                     if not hasattr(block, "aps_"):
-                        block.fit_forward(err, y, Xt=G)
+                            block.fit_forward(err, y, Xt=G)
                     err -= block.inv_transform(G)
                 # Calculate train info
                 train_info_row = dict()
                 train_info_row["block"] = self.n_blocks_
                 train_info_row["rank"] = block.rank_
 
-                Xt = self.transform(X)
                 if self.extra_train_info:
+                    Xt = self.transform(X)
                     if b < len(self.ranks) - 1 or self.forward:
                         X_approx = self.inv_transform(Xt)
                     else:
@@ -604,7 +726,8 @@ class BTTDA(BaseEstimator, TransformerMixin):
                     train_info_row.update(backward_stats(Xt, y))
                     train_info_row.update(forward_stats(X, Xt, X_approx, y))
                 self.train_info_.append(train_info_row)
-            except LinAlgError:
+            except (LinAlgError, ValueError) as e:
+                warnings.warn(RuntimeWarning(str(e)))
                 break
             
 
@@ -623,7 +746,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
     def n_params_(self):
         return sum([b.n_params_ for b in self.blocks_])
 
-    def transform(self, X, y=None, blocks=None, n_blocks=None, return_err=False, **_):
+    def transform(self, X, y=None, blocks=None, n_blocks=None, return_err=False, flatten=True, **_):
         assert tl.is_tensor(X)
         err = tl.copy(X)
         n_samples, *_ = X.shape
@@ -634,11 +757,15 @@ class BTTDA(BaseEstimator, TransformerMixin):
             blocks = blocks[:n_blocks]
         for b, block in enumerate(blocks):
             Xtb = block.transform(err, y)
-            Xt.append(Xtb.reshape(n_samples, -1))
             if b < len(blocks) - 1:
-                err -= block.inv_transform(Xtb)
+                 err -= block.inv_transform(Xtb)
+            if flatten:
+                Xtb= Xtb.reshape((n_samples, -1))
+            Xt.append(Xtb)
+ 
 
-        Xt = tl.concatenate(Xt, axis=1)
+        if flatten:
+            Xt = tl.concatenate(Xt, axis=1)
         if return_err:
             return Xt, err
         return Xt
@@ -662,3 +789,89 @@ class BTTDA(BaseEstimator, TransformerMixin):
     @property
     def ranks_(self):
         return tuple([b.rank_ for b in self.blocks_])
+
+def f_multiway(
+    X,
+    y=None,
+    classes=None,
+    class_counts=None,
+    assume_centered=False,
+    means=None,
+    method="tr",
+):
+    n_samples, *shape = X.shape
+    n_features = math.prod(shape)
+    if not tl.is_tensor(X):
+        X = tl.tensor(X)
+    if classes is None or class_counts is None:
+        classes, class_counts = np.unique(y, return_counts=True)
+    n_classes = len(classes)
+    # Calculate class means, overall class mean and center data
+    if assume_centered:
+        X_centered = X
+        if means is None:
+            raise ValueError("must specify means when assume_centered=True")
+    else:
+        means, X_centered = center(X, y, classes)
+
+    class_mean = tl.mean(means, axis=0)
+    if method == "tr":
+        tr_scatter_w = norm_fro(X_centered) ** 2
+        tr_scatter_b = 0
+        for ci, c in enumerate(classes):
+            mean_centered = means[ci] - class_mean
+            tr_scatter_b += class_counts[ci] * norm_fro(mean_centered) ** 2
+        # Calculate Fisher ratio
+        F = (tr_scatter_b / tr_scatter_w)# * ((n_classes - 1) / (n_samples - n_classes))
+    elif method == "rt":
+        X_centered_flat = tl.unfold(X_centered, 0)
+
+        scatter_w, _ = mode_scatter(
+            X_centered_flat, 0, assume_centered=True, shrinkage="lw"
+        )
+        means_flat = tl.unfold(means, 0)
+        scatter_b, _ = mode_scatter(means_flat, 0, assume_centered=False, shrinkage=0)
+        w = solve_gevdh(
+            scatter_b,
+            scatter_w,
+            rank=X_centered_flat.shape[-1],
+            solver="lanczos",
+            eigvals_only=True,
+        )
+        F = tl.sum(w)
+    else:
+        raise ValueError(
+            "method must be either 'tr' (trace-ratio) or 'rt' (ratio-trace)"
+        )
+    return F
+
+
+def f_oneway(X, y, classes=None, class_counts=None):
+    n_samples, *shape = X.shape
+    order = len(shape)
+    if classes is None or class_counts is None:
+        classes, class_counts = np.unique(y, return_counts=True)
+    n_classes = len(classes)
+    ss_alldata = tl.sum(X**2, axis=0)
+    sums_per_class, _ = center(X, y, classes)
+    # sums_per_class *= tl.tensor(class_counts)[:, np.newaxis, np.newaxis]
+    sums_per_class *= tl.tensor(
+        np.expand_dims(class_counts, axis=tuple(np.arange(1, order + 1)))
+    )
+    square_of_sums_alldata = tl.sum(sums_per_class, axis=0) ** 2
+    square_of_sums_per_class = sums_per_class**2
+    sstot = ss_alldata - square_of_sums_alldata / n_samples
+    ssbn = 0.0
+    for ci in range(n_classes):
+        ssbn += square_of_sums_per_class[ci] / class_counts[ci]
+    ssbn -= square_of_sums_alldata / float(n_samples)
+    sswn = sstot - ssbn
+    dfbn = n_classes - 1
+    dfwn = n_samples - n_classes
+    msb = ssbn / dfbn
+    msw = sswn / dfwn
+    F = msb / msw
+    p = fdtrc(dfbn, dfwn, F)
+    return F, p
+
+

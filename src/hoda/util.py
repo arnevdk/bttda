@@ -1,14 +1,17 @@
 import math
+import warnings
 
 import numpy as np
 import scipy.linalg
 import tensorly as tl
 from numpy.linalg import LinAlgError
-
-from hoda.cov import mode_scatter
+import scipy.sparse.linalg
+#from hoda.cov import mode_scatter
 
 try:
     import cupy
+    import cupyx.scipy.sparse.linalg
+    import cupy.linalg
 except ImportError:
     pass
 
@@ -18,28 +21,63 @@ def norm_fro(A):
 
 
 def solve_gevdh(
-    A, B=None, solver="lanczos", rank=None, eigvals_only=False, **solver_params
+        A, B=None, solver="lanczos", rank=None, eigvals_only=False, which='LA', init=None, tol=1e-16, **solver_params
 ):
+    if rank is None:
+        rank = A.shape[0]
+
     if solver == "lanczos":
-        subset = None
-        n = A.shape[-1]
-        if rank is not None:
-            subset = [n - rank, n - 1]
-        res = scipy.linalg.eigh(
-            A,
-            b=B,
-            check_finite=False,
-            subset_by_index=subset,
-            eigvals_only=eigvals_only,
-            **solver_params
-        )
-        if isinstance(res, tuple):
-            res = (res[1], res[0])
+        if tl.get_backend() == 'numpy':
+            w,v = scipy.sparse.linalg.eigsh(
+                A, k=rank, M=B,
+                which=which,
+                return_eigenvectors=~eigvals_only,
+            )
+        elif tl.get_backend() == 'cupy':
+            C = A
+            if B is not None:
+                C = tl.solve(B,A)
+            w,v = cupy.linalg.eigh(C)
+            # sort
+            if which=='LM':
+                idc = tl.argsort(-tl.abs(w))[:rank]
+            elif which=='LA':
+                w,v = w[-rank:], v[:,-rank:]
+            elif which=='SM':
+                idc = tl.argsort(tl.abs(w))[:rank]
+            elif which=='SA':
+                w,v = w[:rank], v[:,:rank]
+
+            #if rank==C.shape[0]:
+            #    w,v = cupy.linalg.eigh(C)
+            #else:
+            #    w,v = cupyx.scipy.sparse.linalg.eigsh(
+            #        C, k=rank,
+            #        which=which,
+            #        return_eigenvectors=~eigvals_only,
+            #    )
+            #    if np.any(np.isnan(w)):
+            #        warnings.warn('cupyx.scipy.sparse.linalg.eigsh failed, using cupy.linalg.eigh')
+            #        w,v = cupy.linalg.eigh(C)
+        else:
+            raise NotImplementedError
     if solver == "svd":
         raise NotImplementedError
     if solver == "lobpcg":
         raise NotImplementedError
-    return res
+    if eigvals_only:
+        return w
+
+
+    # this does not run fast on the GPU
+    #min_ev = tl.min(tl.abs(w))
+    #max_ev = tl.max(tl.abs(w))
+    #if min_ev<tol*max_ev:
+    #     null_idc = tl.abs(w)<tol*tl.max(tl.abs(w))
+    #     warnings.warn('completing incomplete basis with orthogonal vectors')
+    #     basis_completion =  complete_orthonormal_basis(v[:,~null_idc], rank)
+    #     v[:,null_idc] = basis_completion
+    return v,w
 
 
 def center(X, y, classes=None):
@@ -75,120 +113,71 @@ def center(X, y, classes=None):
     return means, X_centered
 
 
-def f_multiway(
-    X,
-    y=None,
-    classes=None,
-    class_counts=None,
-    assume_centered=False,
-    means=None,
-    method="tr",
-):
-    n_samples, *shape = X.shape
-    n_features = math.prod(shape)
-    if not tl.is_tensor(X):
-        X = tl.tensor(X)
-    if classes is None or class_counts is None:
-        classes, class_counts = np.unique(y, return_counts=True)
-    n_classes = len(classes)
-    # Calculate class means, overall class mean and center data
-    if assume_centered:
-        X_centered = X
-        if means is None:
-            raise ValueError("must specify means when assume_centered=True")
-    else:
-        means, X_centered = center(X, y, classes)
 
-    class_mean = tl.mean(means, axis=0)
-    if method == "tr":
-        tr_scatter_w = norm_fro(X_centered) ** 2
-        tr_scatter_b = 0
-        for ci, c in enumerate(classes):
-            mean_centered = means[ci] - class_mean
-            tr_scatter_b += class_counts[ci] * norm_fro(mean_centered) ** 2
-        # Calculate Fisher ratio
-        F = (tr_scatter_b / tr_scatter_w) * ((n_classes - 1) / (n_samples - n_classes))
-    elif method == "rt":
-        X_centered_flat = tl.unfold(X_centered, 0)
+def ridge_regression(X, Y, lambda_=0):
+        """
+        Compute the ridge regression solution for matrix Y.
+        
+        X: Input matrix (n x p)
+        Y: Target matrix (n x m)
+        lambda_: Regularization parameter
+        
+        Returns:
+        W: The ridge regression weight matrix (p x m)
+        """
+        n, p = X.shape
+        _, m = Y.shape
+        scatter = X.T@X
+        scale = lambda_*tl.trace(scatter)
+        target = scale*get_eye(p)
+        XTX_plus_lambda_I = scatter + target
+        XTy = X.T @ Y
+        W = tl.solve(XTX_plus_lambda_I, XTy)
+        return W
 
-        scatter_w, _ = mode_scatter(
-            X_centered_flat, 0, assume_centered=True, shrinkage="lw"
-        )
-        means_flat = tl.unfold(means, 0)
-        scatter_b, _ = mode_scatter(means_flat, 0, assume_centered=False, shrinkage=0)
-        w = solve_gevdh(
-            scatter_b,
-            scatter_w,
-            rank=X_centered_flat.shape[-1],
-            solver="lanczos",
-            eigvals_only=True,
-        )
-        F = tl.sum(w)
-    else:
-        raise ValueError(
-            "method must be either 'tr' (trace-ratio) or 'rt' (ratio-trace)"
-        )
-    return F
+def get_eye(n_features):
+    """Cache identity matrix to avoid recomputing it multiple times."""
+    if not hasattr(get_eye, "cache"):
+        get_eye.cache = {}  # Initialize cache
+    if n_features not in get_eye.cache:
+        get_eye.cache[n_features] = tl.eye(n_features)  # Store once
+    return get_eye.cache[n_features]
 
 
-def r_squared(
-    X,
-    y=None,
-    classes=None,
-    class_counts=None,
-    assume_centered=False,
-    means=None,
-):
-    n_samples, *shape = X.shape
-
-    if not tl.is_tensor(X):
-        X = tl.tensor(X)
-    if classes is None or class_counts is None:
-        classes, class_counts = np.unique(y, return_counts=True)
-    # Calculate class means, overall class mean and center data
-    if assume_centered:
-        X_centered = X
-        if means is None:
-            raise ValueError("must specify means when assume_centered=True")
-    else:
-        means, X_centered = center(X, y, classes)
-    SS_res = norm_fro(X_centered) ** 2
-    SS_tot = norm_fro(X) ** 2
-    return 1 - SS_res / SS_tot
+def flip_signs(u):
+    n_rows, n_cols = u.shape
+    signs = tl.zeros(n_cols)
+    ones = tl.ones(n_rows)
+    signs = tl.sign(u.T@ones)
+    return u * signs
+ 
+def complete_orthonormal_basis(Q, target_dim):
+    """
+    Given a set of linearly independent vectors in A, complete it to an orthonormal basis
+    of dimension 'target_dim' using standard basis vectors if necessary.
+    """
+    Q = Q.copy()
+    m, n = Q.shape
 
 
-def f_oneway(X, y, classes=None, class_counts=None):
-    n_samples, *shape = X.shape
-    order = len(shape)
-    if classes is None or class_counts is None:
-        classes, class_counts = np.unique(y, return_counts=True)
-    n_classes = len(classes)
-    ss_alldata = tl.sum(X**2, axis=0)
-    sums_per_class, _ = center(X, y, classes)
-    # sums_per_class *= tl.tensor(class_counts)[:, np.newaxis, np.newaxis]
-    sums_per_class *= tl.tensor(
-        np.expand_dims(class_counts, axis=tuple(np.arange(1, order + 1)))
-    )
-    square_of_sums_alldata = tl.sum(sums_per_class, axis=0) ** 2
-    square_of_sums_per_class = sums_per_class**2
-    sstot = ss_alldata - square_of_sums_alldata / n_samples
-    ssbn = 0.0
-    for ci in range(n_classes):
-        ssbn += square_of_sums_per_class[ci] / class_counts[ci]
-    ssbn -= square_of_sums_alldata / float(n_samples)
-    sswn = sstot - ssbn
-    dfbn = n_classes - 1
-    dfwn = n_samples - n_classes
-    msb = ssbn / dfbn
-    msw = sswn / dfwn
-    F = msb / msw
-    p = fdtrc(dfbn, dfwn, F)
-    return F, p
+    # Step 2: Add standard basis vectors to complete the basis
+    standard_basis = tl.eye(m)  # Standard basis vectors (identity matrix columns)
+    
+    
+    for i in range(m):
+        if Q.shape[1] >= target_dim:
+            break  # Stop if we've reached the target rank
+        
+        candidate = standard_basis[:, i]  # Pick a standard basis vector
+
+        # Remove components along existing basis
+        new_vec = candidate - Q @ (Q.T @ candidate)
+
+        # Normalize and check if it's a valid new basis vector
+        norm_new_vec = tl.norm(new_vec)
+        if norm_new_vec > 1e-10:
+            new_vec /= norm_new_vec  # Normalize
+            Q = np.column_stack((Q, new_vec))  # Add to basis
+    return Q[:,n:]
 
 
-def lstsq_ridge(X, y, lambda_=1):
-    I = tl.eye(X.shape[1])
-    XTX = X.T @ X
-    n_features = XTX.shape[0]
-    pseudo_inverse = pinv(XTX + lambda_ * tl.trace(XTX) * I / n_features) @ X.T
-    return pseudo_inverse @ y

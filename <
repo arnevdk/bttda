@@ -1,0 +1,19 @@
+#!/bin/bash
+mkdir -p data/predictions
+for theta in 0 1; do
+#for theta in 0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1; do
+	for subject in 1 2; do
+	#for subject in 1 2 3 4 5 6 7 8; do
+		echo $theta 
+		echo $subject
+		sbatch --job-name="gridsearch-theta_$theta-subject_$subject_$subject" \
+		       	--clusters wice \
+		       	--partition gpu \
+			--account llonpp \
+			--output  out/slurm-%x-%A.out \
+			--ntasks=18 \
+			--gpus-per-node=1 \
+			--time=60 \
+			jobs/gridsearch.job.sh $theta $subject $1 $2
+	done
+done

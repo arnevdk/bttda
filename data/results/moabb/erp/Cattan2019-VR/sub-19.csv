@@ -1,0 +1,4 @@
+,score,time,samples,subject,session,channels,n_sessions,dataset,pipeline
+0,0.99069446,69.08849,720.0,19,1PC,16,1,Cattan2019-VR,PARAFACDA
+1,0.9852778,18.094357,720.0,19,1PC,16,1,Cattan2019-VR,HODA
+2,0.9902083,514.68945,720.0,19,1PC,16,1,Cattan2019-VR,BTTDA

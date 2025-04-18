@@ -6,7 +6,13 @@ import warnings
 import numpy as np
 import tensorly as tl
 from sklearn.base import BaseEstimator
+import scipy.linalg
+from hoda.util import get_eye
 
+try:
+    import cupyx.scipy.linalg
+except ImportError:
+    pass
 
 def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
@@ -16,25 +22,31 @@ def mode_scatter(
     n_samples, *shape = X.shape
     order = len(shape)
     n_features = shape[k]
-    if weights is not None:
-        X = (X.T * weights).T
     # Determine mode scatter
     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
     if not assume_centered:
         X = X - tl.mean(X, axis=0)
-    scatter = tl.tensordot(X, X, axes=(modes, modes))
-    # Xf = tl.unfold(X, k + 1)
-    # scatter = Xf @ Xf.T
+    if weights is None:
+        weights = tl.ones(n_samples)
+
+    weights = tl.reshape(weights, (n_samples,) + (1,) * (X.ndim - 1))  # Expands to match X
+    X_weighted = X * weights  # Now broadcasting works for any shape
+
+    scatter = tl.tenalg.tensordot(X_weighted, X,  (modes,modes))
+
     # Force Toeplitz
     if toeplitz is not None and k in toeplitz:
         scatter = force_toeplitz(scatter, taper=taper)
     # Determine shrinkage
     if shrinkage == "lw":
-        Xf = tl.unfold(X, k + 1)
-        shrinkage = ledoit_wolf_shrinkage(
-            Xf.T,
-            assume_centered=assume_centered,
-        )
+        if scatter.shape[0] == 1:
+            shrinkage=0
+        else:
+            Xf = tl.unfold(X, k + 1)
+            shrinkage = ledoit_wolf_shrinkage(
+                Xf.T,
+                assume_centered=assume_centered,
+            )
     elif shrinkage == "oas":
         n = n_samples * math.prod(shape) / shape[k]
         cov = scatter / (n - 1)
@@ -50,9 +62,11 @@ def mode_scatter(
     elif shrinkage == "loocv":
         raise NotImplemented
 
-    structured = tl.eye(n_features)
-    structured *= tl.trace(scatter) / n_features
-    scatter = (1 - shrinkage) * scatter + shrinkage * structured
+
+    trace = tl.trace(scatter)
+    scale = trace / n_features
+    target = get_eye(n_features) * scale
+    scatter = (1 - shrinkage) * scatter + shrinkage * target
     return scatter, shrinkage
 
 
@@ -65,7 +79,10 @@ def force_toeplitz(A, taper=False):
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper
-    return scipy.linalg.toeplitz(toep)
+    if tl.get_backend()=='numpy':
+        return scipy.linalg.toeplitz(toep)
+    elif tl.get_backend()=='cupy':
+        return cupyx.scipy.linalg.toeplitz(toep)
 
 
 def ledoit_wolf_shrinkage(
@@ -119,10 +136,10 @@ def ledoit_wolf_shrinkage(
     # number of blocks to split the covariance matrix into
     n_splits = int(n_features / block_size)
     X2 = X**2
-    emp_cov_trace = tl.sum(X2, axis=0) / n_samples
-    mu = tl.sum(emp_cov_trace) / n_features
-    beta_ = 0.0  # sum of the coefficients of <X2.T, X2>
-    delta_ = 0.0  # sum of the *squared* coefficients of <X.T, X>
+    emp_cov_trace = tl.sum(X2) / n_samples
+    mu = emp_cov_trace / n_features
+    beta_ = tl.tensor(0.0)  # sum of the coefficients of <X2.T, X2>
+    delta_ = tl.tensor(0.0)  # sum of the *squared* coefficients of <X.T, X>
     # starting block computation
     for i in range(n_splits):
         for j in range(n_splits):
@@ -149,7 +166,7 @@ def ledoit_wolf_shrinkage(
 
     beta = 1.0 / (n_features * n_samples) * (beta_ / n_samples - delta_)
     # delta is the sum of the squared coefficients of (<X.T,X> - mu*Id) / p
-    delta = delta_ - 2.0 * mu * emp_cov_trace.sum() + n_features * mu**2
+    delta = delta_ - 2.0 * mu * emp_cov_trace + n_features * mu**2
     delta /= n_features
     # get final beta as the min between beta and delta
     # We do this to prevent shrinking more than "1", which would invert
@@ -158,6 +175,8 @@ def ledoit_wolf_shrinkage(
     # finally get shrinkage
     # shrinkage = 0 if beta == 0 else beta / delta
     shrinkage = beta / delta
+    shrinkage = min(shrinkage,1)
+    shrinkage = max(shrinkage,0)
     return shrinkage
 
 
