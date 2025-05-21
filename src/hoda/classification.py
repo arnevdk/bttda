@@ -11,6 +11,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import StratifiedKFold
 from joblib import Parallel, delayed
+import joblib
 from hoda.tensorize import vec
 from hoda.hoda import BTTDA, f_oneway
 from sklearn.metrics import get_scorer
@@ -141,10 +142,12 @@ class BTTDACV(BTTDA):
         for fold, (train_idc, test_idc) in enumerate(cv.split(X,y)):
             for theta in thetas:
                 args_list.append((X,y,fold,train_idc, test_idc, theta, clf, scorer))
-        results = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(delayed(self._evaluate)(*args) for args in args_list)
+        #with joblib.parallel_backend('loky'):
+        results = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
+            delayed(self._eval_bttdacv_search_fold)(*args) for args in args_list)
         return pd.concat(results, ignore_index=True)
 
-    def _evaluate(self, X,y, fold,  train_idc, test_idc, theta, clf, scorer):
+    def _eval_bttdacv_search_fold(self, X,y, fold,  train_idc, test_idc, theta, clf, scorer):
         if self.verbose:
             print(f'fold={fold}, theta={theta}')
         clf = clone(clf)

@@ -1,0 +1,26 @@
+name: bttda-cuda
+channels:
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - cuda-version=12.6
+  - cuda-cudart=12.6
+  - cutensor
+  - cupy
+  - pip
+  - pip:
+    - -e .
+  # Benchmark requirements
+    - moabb
+  - mne
+  - pandas
+  - dask
+  - dask-jobqueue
+  - jupyter
+  - plotly
+variables:
+  TENSORLY_BACKEND: "cupy"
+  TENSORLY_TENALG_BACKEND: "einsum"
+  CUPY_ACCELLERATORS: "cutensor,cub"

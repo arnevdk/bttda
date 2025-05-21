@@ -26,17 +26,28 @@ def mode_scatter(
     modes = [0] + [kk + 1 for kk in range(order) if kk != k]
     if not assume_centered:
         X = X - tl.mean(X, axis=0)
+
     if weights is None:
         weights = tl.ones(n_samples)
-
     weights = tl.reshape(weights, (n_samples,) + (1,) * (X.ndim - 1))  # Expands to match X
-    X_weighted = X * weights  # Now broadcasting works for any shape
-
-    scatter = tl.tenalg.tensordot(X_weighted, X,  (modes,modes))
-
-    # Force Toeplitz
+ 
     if toeplitz is not None and k in toeplitz:
-        scatter = force_toeplitz(scatter, taper=taper)
+        n_lags = shape[k]
+        scatter_toep = tl.zeros(n_lags)
+        Xt = tl.moveaxis(X, k+1, 1)
+        for lag in range(n_lags):
+            valid = Xt[:, :n_lags-lag]* Xt[:, lag:]*weights
+            scatter_toep[lag] = tl.sum(valid)
+        scatter_toep/=n_lags
+        if tl.get_backend()=='numpy':
+            scatter =  scipy.linalg.toeplitz(scatter_toep)
+        elif tl.get_backend()=='cupy':
+            scatter =  cupyx.scipy.linalg.toeplitz(scatter_toep)
+
+    else:
+        scatter = tl.tenalg.tensordot(X*weights, X,  (modes,modes))
+
+
     # Determine shrinkage
     if shrinkage == "lw":
         if scatter.shape[0] == 1:
@@ -76,6 +87,7 @@ def force_toeplitz(A, taper=False):
     for i in range(n):
         diag = tl.diag(A, k=i)
         toep[i] = tl.mean(diag)
+
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
         toep = toep * taper

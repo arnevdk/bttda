@@ -15,17 +15,16 @@ import numpy as np
 import scipy.signal
 from mne.filter import resample
 
-def filter_hilbert_stf(X):
-    ipdb.set_trace()
-    X = X.transpose((0,3,1,2))
-    X = np.log(np.abs(scipy.signal.hilbert(X)))
-    X = resample(X, down=sfreq/target_sfreq, n_jobs=-1, verbose=True)
-    X = tl.tensor(X)
-    return X
 
 def vec(X, y=None, extra=None):
     x = X.reshape((X.shape[0], -1))
     return x
+
+def fh_envelope(X, sfreq=250, target_sfreq=32):
+    X = X.transpose((0,3,1,2))
+    X = np.log(np.abs(scipy.signal.hilbert(X)))
+    X = resample(X, down=sfreq/target_sfreq, n_jobs=-1, verbose=True)
+    return X
 
 
 def hankel_tensor(X, y=None):

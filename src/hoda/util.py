@@ -92,9 +92,8 @@ def center(X, y, classes=None):
         X_centered = tl.zeros((n_classes, *X.shape))
         full_nan = cupy.full_like(X, cupy.nan)
         for ci, c in enumerate(classes):
-            where = y == c
-            where = cupy.array(where)
-            where = np.expand_dims(where, axis=tuple(np.arange(1, order + 1)))
+            where = tl.tensor(y==c)
+            where = cupy.expand_dims(where, axis=tuple(np.arange(1, order + 1)))
             X_where = cupy.where(
                 where,
                 X,
@@ -146,7 +145,6 @@ def get_eye(n_features):
 
 def flip_signs(u):
     n_rows, n_cols = u.shape
-    signs = tl.zeros(n_cols)
     ones = tl.ones(n_rows)
     signs = tl.sign(u.T@ones)
     return u * signs

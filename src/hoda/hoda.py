@@ -2,7 +2,7 @@ import math
 import pdb
 from numpy.linalg import LinAlgError
 import warnings
-
+import os
 
 import numpy as np
 import tensorly as tl
@@ -107,6 +107,17 @@ OBJECTIVES = dict(
     sr=obj_sr,
 )
 
+def validate(X, y=None):
+    tl.initialize_backend()
+    tl.tenalg.set_backend('einsum')
+    tl.plugins.use_opt_einsum()
+
+    #assert tl.get_backend() == 'cupy'
+    assert tl.is_tensor(X)
+    return X,y
+
+
+
 class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def __init__(
         self,
@@ -140,18 +151,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.theta = theta
         self.forward = forward
 
-    def _validate(self, X, y):
-        if not tl.is_tensor(X):
-            raise ValueError("X should be a tensorly tensor")
-
-        if self.theta is not None and (self.theta > 1.0 or self.theta < 0):
-            raise ValueError("theta should lie in [0, 1]")
-
-        if self.solver == "svd" and self.obj == "tr":
-            raise ValueError("svd solver cannot be used with trace-ratio objective")
-
     def fit(self, X, y, classes=None, class_counts=None):
-        self._validate(X, y)
+        X, y=validate(X, y)
         # Calculate means, centering and classes once (slow on GPU)
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -175,10 +176,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.fit_forward(X, y, X_centered=X_centered)
         return self
 
-    def _setup_tl(self):
-        tl.tenalg.set_backend('einsum')
-        tl.plugins.use_opt_einsum()
-
     def fit_backward(
         self,
         X,
@@ -188,8 +185,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         classes=None,
         class_counts=None,
     ):
-        self._setup_tl()
-        self._validate(X, y)
+        X, y=validate(X, y)
 
 
         # TODO: calculate train info for initialization
@@ -315,7 +311,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     **solver_params,
                 )
 
-
                 
                 # Calculate update and check convergence
                 if u.shape[-1] != self.weights_[k].shape[-1]:
@@ -327,6 +322,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     update /= tl.norm(old)
 
                 converged = update < self.tol and converged
+
 
                 if np.any(np.isnan(u)):
                     raise LinAlgError('NaN in weights')
@@ -364,9 +360,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             warnings.warn('Maximum number of iterations reached without convergence')
 
     def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
-        self._setup_tl()
-        self._setup_tl()
-        self._validate(X, y)
+        X, y=validate(X, y)
 
         n_samples, *shape = X.shape
         order = len(shape)
@@ -594,7 +588,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.aps_.append(tl.copy(w))
 
     def transform(self, X, y=None):
-        assert tl.is_tensor(X)
+        X, y=validate(X, y)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
             X, self.weights_, modes=range(1, order + 1), transpose=True
@@ -602,7 +596,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None):
-        assert tl.is_tensor(Xt)
+        X, y=validate(Xt, y)
         order = Xt.ndim - 1
         modes = [k + 1 for k in range(order)]
         return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes)
@@ -677,7 +671,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.forward = forward
 
     def fit(self, X, y=None, blocks=None):
-        assert tl.is_tensor(X)
+        X, y=validate(X, y)
         n_samples, *shape = X.shape
 
         self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -733,9 +727,9 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
 
         # Convert train info to list dict
-        self.train_info_ = {
-            k: [dic[k] for dic in self.train_info_] for k in self.train_info_[0]
-        }
+        #self.train_info_ = {
+        #    k: [dic[k] for dic in self.train_info_] for k in self.train_info_[0]
+        #}
         return self
 
     @property
@@ -747,7 +741,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return sum([b.n_params_ for b in self.blocks_])
 
     def transform(self, X, y=None, blocks=None, n_blocks=None, return_err=False, flatten=True, **_):
-        assert tl.is_tensor(X)
+        X, y=validate(X, y)
         err = tl.copy(X)
         n_samples, *_ = X.shape
         Xt = []
@@ -771,6 +765,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None, n_blocks=None):
+        X, y=validate(Xt, y)
         n_samples, _ = Xt.shape
         if n_blocks is None:
             n_blocks = self.n_blocks_
