@@ -7,6 +7,8 @@ import tensorly as tl
 from numpy.linalg import LinAlgError
 import scipy.sparse.linalg
 #from hoda.cov import mode_scatter
+from scipy.sparse.linalg import ArpackNoConvergence, ArpackError
+import scipy.linalg
 
 try:
     import cupy
@@ -28,25 +30,25 @@ def solve_gevdh(
 
     if solver == "lanczos":
         if tl.get_backend() == 'numpy':
-            w,v = scipy.sparse.linalg.eigsh(
-                A, k=rank, M=B,
-                which=which,
-                return_eigenvectors=~eigvals_only,
-            )
+            w,v = scipy.linalg.eigh(A, b=B)
         elif tl.get_backend() == 'cupy':
             C = A
             if B is not None:
                 C = tl.solve(B,A)
             w,v = cupy.linalg.eigh(C)
-            # sort
-            if which=='LM':
-                idc = tl.argsort(-tl.abs(w))[:rank]
-            elif which=='LA':
-                w,v = w[-rank:], v[:,-rank:]
-            elif which=='SM':
-                idc = tl.argsort(tl.abs(w))[:rank]
-            elif which=='SA':
-                w,v = w[:rank], v[:,:rank]
+        else:
+            raise NotImplementedError
+
+        # Truncate
+        if which=='LM':
+            idc = tl.argsort(-tl.abs(w))[:rank]
+        elif which=='LA':
+            w,v = w[-rank:], v[:,-rank:]
+        elif which=='SM':
+            idc = tl.argsort(tl.abs(w))[:rank]
+        elif which=='SA':
+            w,v = w[:rank], v[:,:rank]
+
 
             #if rank==C.shape[0]:
             #    w,v = cupy.linalg.eigh(C)
@@ -59,8 +61,6 @@ def solve_gevdh(
             #    if np.any(np.isnan(w)):
             #        warnings.warn('cupyx.scipy.sparse.linalg.eigsh failed, using cupy.linalg.eigh')
             #        w,v = cupy.linalg.eigh(C)
-        else:
-            raise NotImplementedError
     if solver == "svd":
         raise NotImplementedError
     if solver == "lobpcg":

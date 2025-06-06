@@ -17,6 +17,7 @@ from hoda.hoda import BTTDA, f_oneway
 from sklearn.metrics import get_scorer
 from sklearn.base import clone
 from sklearn.feature_selection import SelectFdr
+import warnings
 
 
 try:
@@ -36,6 +37,19 @@ class ZScore(BaseEstimator, TransformerMixin):
         mean = self.mean_.reshape(shape)
         std = self.std_.reshape(shape)
         return (X - mean) / std
+
+class ZLogRatio(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        self.mean_ = np.mean(X, axis=(0,-1))
+        self.std_log_ = np.std(np.log10(X), axis=(0,-1))
+        return self
+
+    def transform(self, X, y=None):
+        shape = (1, *(X.shape[1:-1]), 1)
+        mean = self.mean_.reshape(shape)
+        std_log = self.std_log_.reshape(shape)
+        return np.log10(X/mean)/std_log
+
 
 
 class SelectFdrMin1(SelectFdr):
@@ -101,11 +115,16 @@ class BTTDACV(BTTDA):
         # Set classifier
         clf = self.clf
         if clf is None:
-            clf = self._make_default_clf()
+            raise ValueError("Must specify a decision classifier")
+
         # Set scoring
         scorer = self.scorer
+        n_classes = len(np.unique(y))
         if scorer is None:
-            scorer = get_scorer('roc_auc')
+            if n_classes > 2:
+                scorer = get_scorer('accuracy')
+            else:
+                scorer = get_scorer('roc_auc')
         cv = self.cv
         if cv is None:
             cv = StratifiedKFold()
@@ -162,23 +181,19 @@ class BTTDACV(BTTDA):
             Xt = bttda.transform(X, n_blocks=n_blocks)
             try:
                 clf.fit(Xt[train_idc], y[train_idc])
+                test_score = scorer(clf, Xt[test_idc], y[test_idc])
             except ValueError as e:
+                warnings.warn(str(e))
                 break
+
             result.append(dict(
                 fold=fold,
                 theta=theta,
                 n_blocks=n_blocks,
-                test_score = scorer(clf, Xt[test_idc], y[test_idc])
+                test_score = test_score
             ))
         result = pd.DataFrame(result)
         return result
  
 
-
-    def _make_default_clf(self):
-        return make_pipeline(
-            FunctionTransformer(tl.to_numpy),
-            StandardScaler(),
-            LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
-        )
 

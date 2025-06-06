@@ -392,7 +392,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 Xk = tl.unfold(X,k+1)
                 Gk = tl.unfold(G,k+1)
                 # TODO: regularization
-                lambda_=0
+                lambda_=0.0
                 ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
 
                 # Calculate update

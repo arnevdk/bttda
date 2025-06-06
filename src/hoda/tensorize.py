@@ -13,18 +13,35 @@ import scipy.signal
 
 import numpy as np
 import scipy.signal
-from mne.filter import resample
 
 
 def vec(X, y=None, extra=None):
     x = X.reshape((X.shape[0], -1))
     return x
 
-def fh_envelope(X, sfreq=250, target_sfreq=32):
+def fh_power(X, sfreq=250, target_sfreq=32):
+    X = X.transpose((0,3,1,2))
+    X = np.abs(scipy.signal.hilbert(X))**2
+    factor = sfreq//target_sfreq
+    X = downsample_last_axis_mean(X, factor)
+    return X
+
+def fh_log_envelope(X, sfreq=250, target_sfreq=32):
     X = X.transpose((0,3,1,2))
     X = np.log(np.abs(scipy.signal.hilbert(X)))
-    X = resample(X, down=sfreq/target_sfreq, n_jobs=-1, verbose=True)
+    factor = sfreq//target_sfreq
+    X = downsample_last_axis_mean(X, factor)
     return X
+
+
+
+def downsample_last_axis_mean(arr, factor):
+    *head, last = arr.shape
+    if last % factor != 0:
+        arr = arr[..., :last - (last % factor)]
+        last = arr.shape[-1]
+    new_shape = (*head, last // factor, factor)
+    return arr.reshape(new_shape).mean(axis=-1)
 
 
 def hankel_tensor(X, y=None):
@@ -136,12 +153,6 @@ class Tensorize(TransformerMixin):
         if not tl.is_tensor(X):
             X = tl.tensor(X)
         return X
-
-def envelope(X, sfreq=250, target_sfreq=32):
-    X = X.transpose((0,3,1,2))
-    X = np.log(np.abs(scipy.signal.hilbert(X)))
-    X = resample(X, down=sfreq/target_sfreq, n_jobs=-1, verbose=True)
-    return X
 
 def Crop(**params):
     return FunctionTransformer(crop, kw_args=params)

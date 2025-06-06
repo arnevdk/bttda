@@ -1,0 +1,9 @@
+,score,time,samples,subject,session,channels,n_sessions,dataset,pipeline
+0,0.36666667,14.532709,60.0,1,0,16,1,AlexandreMotorImagery,HODA
+1,0.38333333,16.573801,60.0,2,0,16,1,AlexandreMotorImagery,HODA
+2,0.43333334,14.819841,60.0,3,0,16,1,AlexandreMotorImagery,HODA
+3,0.48333332,14.6675,60.0,4,0,16,1,AlexandreMotorImagery,HODA
+4,0.25,15.777639,60.0,5,0,16,1,AlexandreMotorImagery,HODA
+5,0.45,15.979056,60.0,6,0,16,1,AlexandreMotorImagery,HODA
+6,0.38333333,14.219427,60.0,7,0,16,1,AlexandreMotorImagery,HODA
+7,0.5,16.584915,60.0,8,0,16,1,AlexandreMotorImagery,HODA

@@ -31,21 +31,24 @@ def mode_scatter(
         weights = tl.ones(n_samples)
     weights = tl.reshape(weights, (n_samples,) + (1,) * (X.ndim - 1))  # Expands to match X
  
-    if toeplitz is not None and k in toeplitz:
-        n_lags = shape[k]
-        scatter_toep = tl.zeros(n_lags)
-        Xt = tl.moveaxis(X, k+1, 1)
-        for lag in range(n_lags):
-            valid = Xt[:, :n_lags-lag]* Xt[:, lag:]*weights
-            scatter_toep[lag] = tl.sum(valid)
-        scatter_toep/=n_lags
-        if tl.get_backend()=='numpy':
-            scatter =  scipy.linalg.toeplitz(scatter_toep)
-        elif tl.get_backend()=='cupy':
-            scatter =  cupyx.scipy.linalg.toeplitz(scatter_toep)
+    #if toeplitz is not None and k in toeplitz:
+    #    n_lags = shape[k]
+    #    scatter_toep = tl.zeros(n_lags)
+    #    Xt = tl.moveaxis(X, k+1, 1)
+    #    for lag in range(n_lags):
+    #        valid = Xt[:, :n_lags-lag]* Xt[:, lag:]*weights
+    #        scatter_toep[lag] = tl.sum(valid)
+    #    scatter_toep/=n_lags
+    #    if tl.get_backend()=='numpy':
+    #        scatter =  scipy.linalg.toeplitz(scatter_toep)
+    #    elif tl.get_backend()=='cupy':
+    #        scatter =  cupyx.scipy.linalg.toeplitz(scatter_toep)
 
-    else:
-        scatter = tl.tenalg.tensordot(X*weights, X,  (modes,modes))
+    #else:
+    #    scatter = tl.tenalg.tensordot(X*weights, X,  (modes,modes))
+    scatter = tl.tenalg.tensordot(X*weights, X,  (modes,modes))
+    if toeplitz is not None and k in toeplitz:
+        scatter = force_toeplitz(scatter)
 
 
     # Determine shrinkage
