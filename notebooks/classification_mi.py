@@ -47,7 +47,7 @@ def get_bttda_params():
         clf=make_clf()
     )
 
-def stf_transform(X, sfreq=250, target_sfreq=32, baseline_sec=0.750, f_min=8, f_max=32):
+def stf_transform(X, sfreq=250, target_sfreq=32, f_min=8, f_max=32, n_freqs=16):
     # define frequencies according to MEEGLET
     freqs, sigma_time, sigma_freq, bw_oct, qt = define_frequencies(
         foi_start=f_min, foi_end=f_max, bw_oct=0.5, delta_oct=1/8
