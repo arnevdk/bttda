@@ -1,7 +1,8 @@
 figures/out
-logs/
 *.html
 *.log
+**/iframe_figures
+
 # Created by https://www.toptal.com/developers/gitignore/api/python,virtualenv,vim,pycharm
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,virtualenv,vim,pycharm
 

@@ -1,4 +1,6 @@
 import math
+import scipy.linalg
+import scipy.linalg
 import pdb
 from numpy.linalg import LinAlgError
 import warnings
@@ -359,7 +361,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if not converged:
             warnings.warn('Maximum number of iterations reached without convergence')
 
-    def fit_forward(self, X, y, X_centered=None, Xt=None, Xt_centered=None):
+    def fit_forward(self, X, y, X_centered=None, Xt=None):
         X, y=validate(X, y)
 
         n_samples, *shape = X.shape
@@ -427,124 +429,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             k: [dic[k] for dic in self.train_info_["forward"]]
             for k in self.train_info_["forward"][0]
         }
-
-#    def _init(self, X,y, classes=None, class_counts=None, X_centered=None, means=None):
-#        n_samples, *shape = X.shape
-#        order = len(shape)
-#
-#        # Determine classes  and center
-#        if classes is None or class_counts is None:
-#            self.classes_, class_counts = np.unique(y, return_counts=True)
-#            class_counts = tl.tensor(class_counts)
-#        else:
-#            self.classes_ = classes
-#        if X_centered is None or means is None:
-#            self.means_, X_centered = center(X, y, self.classes_)
-#        else:
-#            self.means_ = means
-#
-#        self.scatter_w_ = [None] * order
-#
-#        # Determine solver parameters
-#        if self.obj not in OBJECTIVES.keys():
-#            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
-#        solver_params = self.solver_params
-#        if solver_params is None:
-#            solver_params = dict()
-#
-#        # Calculate means and center
-#        means_centered = self.means_ - tl.mean(self.means_, axis=0)
-#
-#        # Calculate total scatter
-#        scatter_t = [None] * order
-#        for k in range(order):
-#            scatter_w, _ = mode_scatter(
-#                X_centered,
-#                k,
-#                assume_centered=True,
-#                shrinkage=self.shrinkage,
-#                toeplitz=self.toeplitz,
-#                taper=self.taper,
-#            )
-#            scatter_b, _ = mode_scatter(
-#                self.means_, k, weights=class_counts, shrinkage=0
-#            )
-#            scatter_t[k] = scatter_w + scatter_b
-#
-#        # Initialize rank
-#        rank = self.rank
-#        if isinstance(rank, np.integer) or isinstance(rank, int):
-#            rank = [rank for k in range(order)]
-#        elif rank is None:
-#            rank = [None for k in range(order)]
-#
-#
-#        # Iteratively find projections
-#        self.weights_ = [None]*order
-#        for k in range(order):
-#           if isinstance(self.shrinkage, tuple):
-#               shrinkage = self.shrinkage[k]
-#           else:
-#               shrinkage = self.shrinkage
-#
-#           scatter_w, shrinkage = mode_scatter(
-#               X_centered,
-#               k,
-#               assume_centered=True,
-#               shrinkage=shrinkage,
-#               toeplitz=self.toeplitz,
-#               taper=self.taper,
-#           )
-#
-#
-#           # Calculate between class scatter
-#           scatter_b, _ = mode_scatter(
-#               means_centered,
-#               k,
-#               weights=class_counts,
-#               shrinkage=0,
-#               assume_centered=True,
-#           )
-#
-#           # Solve
-#           A, B = OBJECTIVES[self.obj](
-#               scatter_b, scatter_w, tl.eye(shape[k])
-#           )
-#
-#           u, w = solve_gevdh(
-#               A,
-#               B=B,
-#               rank=shape[k],
-#               solver=self.solver,
-#               which='LA',
-#               **solver_params,
-#           )
-#           # Calculate explained variance
-#           explained_var = tl.cumsum(tl.abs(w))
-#           explained_var /= tl.max(explained_var)
-#           # Determine rank
-#           if rank[k] is None:
-#               rank[k] = np.count_nonzero(explained_var <= self.theta)
-#               rank[k] = max(1, rank[k])
-#           u = u[:, : rank[k]]
-#
-#           # Re-orthogonalize
-#           u, w = solve_gevdh(
-#               u @ u.T @ scatter_t[k] @ u @ u.T,
-#               rank=rank[k],
-#               solver=self.solver,
-#               which='LM',
-#               **solver_params,
-#           )
-#
-#           self.weights_[k] = u
-#
-#        #if self.obj=='rt' and k > 0:
-#        #    for k in range(order):
-#        #        self.weights_[k] = self.weights_[k][:,:min(self.rank_)]
-
-
-
  
 
     def _init_backward(self, X):
@@ -615,8 +499,8 @@ def backward_stats(Xt, y):
     n, *shape = Xt.shape
     p = math.prod(shape)
     stats = dict()
-    stats["F_tr"] = float(f_multiway(Xt, y, method="tr"))
-    stats["F_rt"] = float(f_multiway(Xt, y, method="rt"))
+    #stats["F_tr"] = float(f_multiway(Xt, y, method="tr"))
+    #stats["F_rt"] = float(f_multiway(Xt, y, method="rt"))
 
     #lda = LinearDiscriminantAnalysis(shrinkage="auto", solver="lsqr")
     #Xtf = tl.to_numpy(Xt.reshape((len(Xt), -1)))
@@ -665,10 +549,10 @@ class BTTDA(BaseEstimator, TransformerMixin):
         forward=True,
     ):
         self.hoda_params = hoda_params
-        self.ranks = ranks
         self.verbose = verbose
         self.extra_train_info = extra_train_info
         self.forward = forward
+        self.ranks=ranks
 
     def fit(self, X, y=None, blocks=None):
         X, y=validate(X, y)
@@ -700,12 +584,15 @@ class BTTDA(BaseEstimator, TransformerMixin):
                         classes=self.classes_,
                         class_counts=class_counts,
                     )
+                    
+                    
+                        
+
                 self.blocks_.append(block)
                 G = block.transform(err)
-                if b < len(self.ranks) - 1 or self.forward:
-                    if not hasattr(block, "aps_"):
-                            block.fit_forward(err, y, Xt=G)
-                    err -= block.inv_transform(G)
+                block.fit_forward(err, y, Xt=G)
+                err -= block.inv_transform(G)
+
                 # Calculate train info
                 train_info_row = dict()
                 train_info_row["block"] = self.n_blocks_
@@ -713,10 +600,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
                 if self.extra_train_info:
                     Xt = self.transform(X)
-                    if b < len(self.ranks) - 1 or self.forward:
-                        X_approx = self.inv_transform(Xt)
-                    else:
-                        X_approx = np.zeros_like(X)
+                    X_approx = self.inv_transform(Xt)
                     train_info_row.update(backward_stats(Xt, y))
                     train_info_row.update(forward_stats(X, Xt, X_approx, y))
                 self.train_info_.append(train_info_row)
@@ -742,27 +626,37 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None, blocks=None, n_blocks=None, return_err=False, flatten=True, **_):
         X, y=validate(X, y)
-        err = tl.copy(X)
         n_samples, *_ = X.shape
-        Xt = []
+
         if blocks is None:
             blocks = self.blocks_
         if n_blocks is not None:
             blocks = blocks[:n_blocks]
-        for b, block in enumerate(blocks):
-            Xtb = block.transform(err, y)
-            if b < len(blocks) - 1:
-                 err -= block.inv_transform(Xtb)
-            if flatten:
-                Xtb= Xtb.reshape((n_samples, -1))
-            Xt.append(Xtb)
- 
+
+
+        Gs = []
+
+        err = tl.copy(X)
+        for block in blocks:
+                G = block.transform(err)
+                Gs.append(G)
+                err -= block.inv_transform(G)
+
+        #res = tl.copy(X)
+        #for b, block in enumerate(blocks):
+        #   new_res = res - block.inv_transform(block.transform(res))
+        #   diff = res-new_res
+        #   res = new_res
+        #   G = block.transform(diff)
+        #   Gs.append(G)
+        
 
         if flatten:
-            Xt = tl.concatenate(Xt, axis=1)
+            Gs = [G.reshape((n_samples, -1)) for G in Gs]
+            Gs = tl.concatenate(Gs, axis=1)
         if return_err:
-            return Xt, err
-        return Xt
+            return Gs, err
+        return Gs
 
     def inv_transform(self, Xt, y=None, n_blocks=None):
         X, y=validate(Xt, y)
@@ -771,6 +665,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
             n_blocks = self.n_blocks_
         n_blocks = min(n_blocks, self.n_blocks_)
         shape = (n_samples, *[s.shape[0] for s in self.blocks_[0].weights_])
+
         X = tl.zeros(shape)
         for b in range(n_blocks):
             block = self.blocks_[b]

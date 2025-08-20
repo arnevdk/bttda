@@ -1,4 +1,0 @@
-,score,time,samples,subject,session,channels,n_sessions,dataset,pipeline
-0,0.8533551,49.08841,4200.0,5,0,8,1,BNCI2014-008,PARAFACDA
-1,0.8462,13.106547,4200.0,5,0,8,1,BNCI2014-008,HODA
-2,0.85446125,336.86835,4200.0,5,0,8,1,BNCI2014-008,BTTDA

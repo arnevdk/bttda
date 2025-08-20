@@ -1,6 +1,6 @@
 from sklearn.pipeline import make_pipeline, Pipeline
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from hoda.classification import ZScore, BTTDACV, SelectFdrMin1, ZLogRatio
+from hoda.classification import ZScore, BTTDACV, SelectFCutoff
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
@@ -10,7 +10,12 @@ import os
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
-from hoda.tensorize import fh_power
+from sklearn.decomposition import PCA
+from mne.time_frequency import tfr_array_morlet
+from meeglet import define_frequencies, define_wavelets, plot_wavelet_family
+import numpy as np
+
+from mne.filter import filter_data
 
 cv=StratifiedKFold(random_state=42, shuffle=True)
 
@@ -19,16 +24,15 @@ cv=StratifiedKFold(random_state=42, shuffle=True)
 def make_clf():
     return  make_pipeline(
         FunctionTransformer(tl.to_numpy),
-        StandardScaler(),
-        SelectFdrMin1(alpha=0.05),
+        PCA(n_components=None, whiten=True),
+        SelectFCutoff(cutoff=1),
         LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
-        #SVC(class_weight='balanced', C=1, kernel='rbf'),
     )
 
 def get_hoda_params():
     return dict(
             max_iter=256,
-            toeplitz=None,
+            toeplitz=(2,),
             taper=False,
             verbose=False,
             refit_shrinkage=True,
@@ -43,24 +47,53 @@ def get_bttda_params():
         clf=make_clf()
     )
 
+def stf_transform(X, sfreq=250, target_sfreq=32, baseline_sec=0.750, f_min=8, f_max=32):
+    # define frequencies according to MEEGLET
+    freqs, sigma_time, sigma_freq, bw_oct, qt = define_frequencies(
+        foi_start=f_min, foi_end=f_max, bw_oct=0.5, delta_oct=1/8
+    )
+    n_cycles = freqs/2
+
+
+    
+    # perform time-frequency transform
+    X_tfr = tfr_array_morlet(X, sfreq, freqs, n_cycles=n_cycles, zero_mean=True, output='complex', n_jobs=1)
+    X_tfr = np.abs(X_tfr)
+    
+    X_tfr_base=  np.log(X_tfr)
+
+
+    # Anti-alias and downsample
+    for fi in range(X_tfr.shape[2]):
+        X_tfr_base[:,:,fi,:] = filter_data(X_tfr_base[:,:,fi,:], sfreq, l_freq=None, h_freq=target_sfreq/2, verbose=False, n_jobs=1)
+    decim = int(np.round(sfreq/target_sfreq))
+    X_tfr_base = X_tfr_base[:,:,:,::decim]
+    X_tfr_base = X_tfr_base[:,:,:,1:-1]
+
+    return X_tfr_base
+
 def get_pipelines_mi():
     pipelines=dict()
+
     
     pipelines['HODA'] = Pipeline([
-        ('stf', FunctionTransformer(fh_power)),
+        ('stf', FunctionTransformer(stf_transform)),
         ('tensorly', FunctionTransformer(tl.tensor)),
-        ('zlogratio', ZLogRatio()),
-        ('zscore', ZScore()),
+        ('zscore1', ZScore()),
         ('bttda',BTTDACV(
             max_n_blocks=1,
-            thetas=[0,0.1,0.2,0.3,0.4,0.5,0.6, 0.7, 0.8, 0.9,1],
+            #thetas=[0.0 ,0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 1.0],
+            thetas=[0.0 ,0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
             **get_bttda_params()
         )),
         ('clf', make_clf())
     ])
+    
+
+
     """
     pipelines['PARAFACDA'] = Pipeline([
-        ('stf', FunctionTransformer(fh_envelope)),
+        ('stf', FunctionTransformer(stf_transform)),
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
         ('bttda',BTTDACV(
@@ -70,17 +103,19 @@ def get_pipelines_mi():
         )),
         ('clf', make_clf())
     ])
-    
+
     pipelines['BTTDA'] = Pipeline([
-        ('stf', FunctionTransformer(fh_envelope)),
+        ('stf', FunctionTransformer(stf_transform)),
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
         ('bttda',BTTDACV(
             max_n_blocks=16,
-            thetas=[0,0.1,0.2,0.3,0.4,0.5,0.6, 0.7, 0.8, 0.9,1],
+            #thetas=[0.0 ,0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 1.0],
+            thetas=[0.0 ,0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
             **get_bttda_params()
         )),
         ('clf', make_clf())
     ])
     """
+    
     return pipelines

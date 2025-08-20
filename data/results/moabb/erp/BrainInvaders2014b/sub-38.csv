@@ -1,4 +1,0 @@
-,score,time,samples,subject,session,channels,n_sessions,dataset,pipeline
-0,0.9271795,78.306816,156.0,38,0,32,1,BrainInvaders2014b,PARAFACDA
-1,0.8566667,30.748013,156.0,38,0,32,1,BrainInvaders2014b,HODA
-2,0.89794874,605.82697,156.0,38,0,32,1,BrainInvaders2014b,BTTDA

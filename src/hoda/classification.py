@@ -16,7 +16,7 @@ from hoda.tensorize import vec
 from hoda.hoda import BTTDA, f_oneway
 from sklearn.metrics import get_scorer
 from sklearn.base import clone
-from sklearn.feature_selection import SelectFdr
+from sklearn.feature_selection import SelectFdr, f_classif
 import warnings
 
 
@@ -50,6 +50,22 @@ class ZLogRatio(BaseEstimator, TransformerMixin):
         std_log = self.std_log_.reshape(shape)
         return np.log10(X/mean)/std_log
 
+class SelectFCutoff(BaseEstimator, TransformerMixin):
+
+    def __init__(self, cutoff=1):
+        self.cutoff=cutoff
+
+    def fit(self, X, y=None):
+        self.scores_, self.p_values_ = f_classif(X,y)
+        self.support_ = self.scores_ > self.cutoff
+        if not np.any(self.support_):
+            self.support_ = np.zeros(len(self.support_), dtype=bool)
+            self.support_[np.argmax(self.scores_)] = True
+        return self
+
+    def transform(self, X, y=None):
+        return X[:, self.support_]
+
 
 
 class SelectFdrMin1(SelectFdr):
@@ -62,6 +78,15 @@ class SelectFdrMin1(SelectFdr):
         if indices:
             support = np.where(support)[0]
         return support
+
+class SelectFKneepoint(TransformerMixin):
+
+    def fit(self, X, y):
+        f, p = f_classif(X,y)
+        print(f)
+        print(p)
+
+        return self
 
 
 class ToeplitzLDAWrapper(BaseEstimator, ClassifierMixin):

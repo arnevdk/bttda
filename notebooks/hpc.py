@@ -6,7 +6,7 @@ from dask.distributed import LocalCluster
 
 TIMEOUT = 12*60*60
 
-def create_cluster(cluster='cpu', scale=256*2*2):
+def create_cluster(cluster='cpu', scale=150, factor=2):
      
     if cluster=='local':
         cluster = LocalCluster(
@@ -15,24 +15,28 @@ def create_cluster(cluster='cpu', scale=256*2*2):
         ) 
     elif cluster=='cpu':
         cluster = SLURMCluster(
-            cores=96,
-            memory="250GB",
+            cores=9*factor,
+            #cores=7*factor,
+            #cores=6*factor,
+            processes=factor,
+            memory="32GB",
             account='llonpp',
             queue='batch_sapphirerapids',
-            walltime='08:00:00',
+            #queue='batch',
+            walltime='04:00:00',
             scheduler_options=dict(
-                dashboard_address=':8787'
+                dashboard_address=':8788'
             ),
             job_extra_directives=[
                 '-M wice',
+                #'-M genius',
                 '-o logs/slurm-%A.log',
-                '--nodes=1',
                 '--export=ALL',
             ],
             local_directory=os.path.join(os.environ['VSC_SCRATCH'],'.cache'),
             death_timeout=TIMEOUT,
         )
-        cluster.scale(scale)
+        cluster.scale(scale*factor)
     else:
         raise ValueError
         

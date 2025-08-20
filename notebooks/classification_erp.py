@@ -1,6 +1,6 @@
 from sklearn.pipeline import make_pipeline, Pipeline
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from hoda.classification import ZScore, BTTDACV, SelectFdrMin1
+from hoda.classification import ZScore, BTTDACV, SelectFCutoff
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
@@ -10,6 +10,10 @@ import os
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
+from sklearn.decomposition import PCA
+from meeglet import define_frequencies, define_wavelets, plot_wavelet_family
+import matplotlib
+import numpy as np
 
 cv=StratifiedKFold(random_state=42, shuffle=True)
 
@@ -18,15 +22,15 @@ cv=StratifiedKFold(random_state=42, shuffle=True)
 def make_clf():
     return  make_pipeline(
         FunctionTransformer(tl.to_numpy),
-        StandardScaler(),
-        SelectFdrMin1(alpha=0.05),
+        PCA(n_components=None, whiten=True),
+        SelectFCutoff(cutoff=1),
         LinearDiscriminantAnalysis(shrinkage='auto', solver='lsqr')
     )
 
 def get_hoda_params():
     return dict(
             max_iter=128,
-            toeplitz=None,
+            toeplitz=(1,),
             taper=False,
             verbose=False,
             refit_shrinkage=True,
@@ -42,7 +46,10 @@ def get_bttda_params():
 
     )
 
+
+
 def get_pipelines():
+
     pipelines=dict()
 
     pipelines['HODA'] = Pipeline([
