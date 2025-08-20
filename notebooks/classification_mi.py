@@ -43,7 +43,7 @@ def get_bttda_params():
         hoda_params=get_hoda_params(),
         verbose=False,
         cv=cv,
-        n_jobs=5*11,
+        n_jobs=-1,
         clf=make_clf()
     )
 

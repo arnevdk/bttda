@@ -1,9 +1,9 @@
 ,score,time,samples,subject,session,channels,n_sessions,dataset,pipeline
-0,0.3,39.660862,60.0,1,0,16,1,AlexandreMotorImagery,HODA
-1,0.51666665,32.908703,60.0,2,0,16,1,AlexandreMotorImagery,HODA
-2,0.36666667,36.55541,60.0,3,0,16,1,AlexandreMotorImagery,HODA
-3,0.6666667,34.069084,60.0,4,0,16,1,AlexandreMotorImagery,HODA
-4,0.48333332,35.226906,60.0,5,0,16,1,AlexandreMotorImagery,HODA
-5,0.31666666,34.201107,60.0,6,0,16,1,AlexandreMotorImagery,HODA
-6,0.81666666,42.028885,60.0,7,0,16,1,AlexandreMotorImagery,HODA
-7,0.6166667,38.896717,60.0,8,0,16,1,AlexandreMotorImagery,HODA
+0,0.3,31.453259,60.0,1,0,16,1,AlexandreMotorImagery,HODA
+1,0.51666665,25.735838,60.0,2,0,16,1,AlexandreMotorImagery,HODA
+2,0.36666667,35.82447,60.0,3,0,16,1,AlexandreMotorImagery,HODA
+3,0.6666667,26.239296,60.0,4,0,16,1,AlexandreMotorImagery,HODA
+4,0.48333332,49.166203,60.0,5,0,16,1,AlexandreMotorImagery,HODA
+5,0.31666666,49.245937,60.0,6,0,16,1,AlexandreMotorImagery,HODA
+6,0.81666666,25.871113,60.0,7,0,16,1,AlexandreMotorImagery,HODA
+7,0.6166667,26.06398,60.0,8,0,16,1,AlexandreMotorImagery,HODA
