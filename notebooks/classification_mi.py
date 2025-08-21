@@ -77,7 +77,6 @@ def get_pipelines_mi():
 
     
     pipelines['HODA'] = Pipeline([
-        ('stf', FunctionTransformer(stf_transform)),
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
         ('bttda',BTTDACV(
@@ -91,9 +90,8 @@ def get_pipelines_mi():
     
 
 
-    """
+    
     pipelines['PARAFACDA'] = Pipeline([
-        ('stf', FunctionTransformer(stf_transform)),
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
         ('bttda',BTTDACV(
@@ -105,7 +103,6 @@ def get_pipelines_mi():
     ])
 
     pipelines['BTTDA'] = Pipeline([
-        ('stf', FunctionTransformer(stf_transform)),
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
         ('bttda',BTTDACV(
@@ -116,6 +113,6 @@ def get_pipelines_mi():
         )),
         ('clf', make_clf())
     ])
-    """
+    
     
     return pipelines
