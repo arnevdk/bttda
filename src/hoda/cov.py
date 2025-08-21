@@ -4,15 +4,17 @@ import pdb
 import warnings
 
 import numpy as np
+import scipy.linalg
 import tensorly as tl
 from sklearn.base import BaseEstimator
-import scipy.linalg
+
 from hoda.util import get_eye
 
 try:
     import cupyx.scipy.linalg
 except ImportError:
     pass
+
 
 def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
@@ -29,9 +31,11 @@ def mode_scatter(
 
     if weights is None:
         weights = tl.ones(n_samples)
-    weights = tl.reshape(weights, (n_samples,) + (1,) * (X.ndim - 1))  # Expands to match X
- 
-    #if toeplitz is not None and k in toeplitz:
+    weights = tl.reshape(
+        weights, (n_samples,) + (1,) * (X.ndim - 1)
+    )  # Expands to match X
+
+    # if toeplitz is not None and k in toeplitz:
     #    n_lags = shape[k]
     #    scatter_toep = tl.zeros(n_lags)
     #    Xt = tl.moveaxis(X, k+1, 1)
@@ -44,17 +48,16 @@ def mode_scatter(
     #    elif tl.get_backend()=='cupy':
     #        scatter =  cupyx.scipy.linalg.toeplitz(scatter_toep)
 
-    #else:
+    # else:
     #    scatter = tl.tenalg.tensordot(X*weights, X,  (modes,modes))
-    scatter = tl.tenalg.tensordot(X*weights, X,  (modes,modes))
+    scatter = tl.tenalg.tensordot(X * weights, X, (modes, modes))
     if toeplitz is not None and k in toeplitz:
-        scatter = force_toeplitz(scatter)
-
+        scatter = force_toeplitz(scatter, taper=taper)
 
     # Determine shrinkage
     if shrinkage == "lw":
         if scatter.shape[0] == 1:
-            shrinkage=0
+            shrinkage = 0
         else:
             Xf = tl.unfold(X, k + 1)
             shrinkage = ledoit_wolf_shrinkage(
@@ -76,7 +79,6 @@ def mode_scatter(
     elif shrinkage == "loocv":
         raise NotImplemented
 
-
     trace = tl.trace(scatter)
     scale = trace / n_features
     target = get_eye(n_features) * scale
@@ -93,10 +95,11 @@ def force_toeplitz(A, taper=False):
 
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
+        print(taper)
         toep = toep * taper
-    if tl.get_backend()=='numpy':
+    if tl.get_backend() == "numpy":
         return scipy.linalg.toeplitz(toep)
-    elif tl.get_backend()=='cupy':
+    elif tl.get_backend() == "cupy":
         return cupyx.scipy.linalg.toeplitz(toep)
 
 
@@ -190,8 +193,8 @@ def ledoit_wolf_shrinkage(
     # finally get shrinkage
     # shrinkage = 0 if beta == 0 else beta / delta
     shrinkage = beta / delta
-    shrinkage = min(shrinkage,1)
-    shrinkage = max(shrinkage,0)
+    shrinkage = min(shrinkage, 1)
+    shrinkage = max(shrinkage, 0)
     return shrinkage
 
 
