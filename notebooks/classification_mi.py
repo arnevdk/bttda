@@ -14,6 +14,8 @@ from sklearn.decomposition import PCA
 from mne.time_frequency import tfr_array_morlet
 from meeglet import define_frequencies, define_wavelets, plot_wavelet_family
 import numpy as np
+import pywt
+import scipy.signal
 
 from mne.filter import filter_data
 
@@ -48,6 +50,7 @@ def get_bttda_params():
     )
 
 def stf_transform(X, sfreq=250, target_sfreq=32, f_min=8, f_max=32, n_freqs=16):
+    """
     # define frequencies according to MEEGLET
     freqs, sigma_time, sigma_freq, bw_oct, qt = define_frequencies(
         foi_start=f_min, foi_end=f_max, bw_oct=0.5, delta_oct=1/8
@@ -71,7 +74,20 @@ def stf_transform(X, sfreq=250, target_sfreq=32, f_min=8, f_max=32, n_freqs=16):
     X_tfr_base = X_tfr_base[:,:,:,1:-1]
 
     return X_tfr_base
+    """
+    freqs = np.arange(f_min, f_max+1)
+    wavelet = 'cmor6-1'
+    center_freq = pywt.central_frequency(wavelet)
+    scales = center_freq * sfreq / freqs
+    coeffs, freqs_out = pywt.cwt(X, scales, wavelet, sampling_period=1/sfreq)
+    X_tfr = np.abs(coeffs)**2
+    X_tfr = np.moveaxis(X_tfr, 0,2)
+    downsample_factor = 20
+    n_bins = int(X_tfr.shape[-1]//20)
+    X_tfr_sub = scipy.signal.resample(X_tfr, n_bins, axis=-1)
+    return X_tfr_sub
 
+    
 def get_pipelines_mi():
     pipelines=dict()
 

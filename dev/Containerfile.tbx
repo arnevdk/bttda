@@ -1,0 +1,2 @@
+FROM localhost/tbx-py:latest
+ENV TENSORLY_BACKEND=numpy
