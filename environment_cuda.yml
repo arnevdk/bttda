@@ -5,21 +5,13 @@ channels:
   - defaults
 dependencies:
   - python=3.11
-  - cuda-version=12.6
-  - cuda-cudart=12.6
-  - cutensor
-  - cupy
+    #- cupy cuda-version=12.6
   - pip
-  - pip:
-    - -e .
-  # Benchmark requirements
-    - moabb
-  - mne
   - pandas
+  - pip:
+    - -e .[experiments]
   - dask
   - dask-jobqueue
-  - jupyter
-  - plotly
 variables:
   TENSORLY_BACKEND: "cupy"
   TENSORLY_TENALG_BACKEND: "einsum"

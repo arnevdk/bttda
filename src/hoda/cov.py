@@ -62,6 +62,7 @@ def mode_scatter(
             Xf = tl.unfold(X, k + 1)
             shrinkage = ledoit_wolf_shrinkage(
                 Xf.T,
+                scatter/(Xf.shape[1]-1),
                 assume_centered=assume_centered,
             )
     elif shrinkage == "oas":
@@ -103,99 +104,124 @@ def force_toeplitz(A, taper=False):
         return cupyx.scipy.linalg.toeplitz(toep)
 
 
-def ledoit_wolf_shrinkage(
-    X,
-    assume_centered=False,
-    block_size=1000,
-):
-    """Estimate the shrunk Ledoit-Wolf covariance matrix.
-    Read more in the :ref:`User Guide <shrunk_covariance>`.
-    Parameters
-    ----------
-    X : array-like of shape (n_samples, n_features)
-        Data from which to compute the Ledoit-Wolf shrunk covariance shrinkage.
-    assume_centered : bool, default=False
-        If True, data will not be centered before computation.
-        Useful to work with data whose mean is significantly equal to
-        zero but is not exactly zero.
-        If False, data will be centered before computation.
-    block_size : int, default=1000
-        Size of blocks into which the covariance matrix will be split.
-    Returns
-    -------
-    shrinkage : float
-        Coefficient in the convex combination used for the computation
-        of the shrunk estimate.
-    Notes
-    -----
-    The regularized (shrunk) covariance is:
-    (1 - shrinkage) * cov + shrinkage * mu * np.identity(n_features)
-    where mu = trace(cov) / n_features
-    """
-    # for only one feature, the result is the same whatever the shrinkage
-    if len(X.shape) == 2 and X.shape[1] == 1:
-        return 0.0
-    if X.ndim == 1:
-        X = tl.reshape(X, (1, -1))
+#def ledoit_wolf_shrinkage(
+#    X,
+#    assume_centered=False,
+#    block_size=1000,
+#):
+#    """Estimate the shrunk Ledoit-Wolf covariance matrix.
+#    Read more in the :ref:`User Guide <shrunk_covariance>`.
+#    Parameters
+#    ----------
+#    X : array-like of shape (n_samples, n_features)
+#        Data from which to compute the Ledoit-Wolf shrunk covariance shrinkage.
+#    assume_centered : bool, default=False
+#        If True, data will not be centered before computation.
+#        Useful to work with data whose mean is significantly equal to
+#        zero but is not exactly zero.
+#        If False, data will be centered before computation.
+#    block_size : int, default=1000
+#        Size of blocks into which the covariance matrix will be split.
+#    Returns
+#    -------
+#    shrinkage : float
+#        Coefficient in the convex combination used for the computation
+#        of the shrunk estimate.
+#    Notes
+#    -----
+#    The regularized (shrunk) covariance is:
+#    (1 - shrinkage) * cov + shrinkage * mu * np.identity(n_features)
+#    where mu = trace(cov) / n_features
+#    """
+#    # for only one feature, the result is the same whatever the shrinkage
+#    if len(X.shape) == 2 and X.shape[1] == 1:
+#        return 0.0
+#    if X.ndim == 1:
+#        X = tl.reshape(X, (1, -1))
+#
+#    if X.shape[0] == 1:
+#        warnings.warn(
+#            "Only one sample available. You may want to reshape your data array"
+#        )
+#    n_samples, n_features = X.shape
+#
+#    # optionally center data
+#    if not assume_centered:
+#        X = X - X.mean(0)
+#
+#    # A non-blocked version of the computation is present in the tests
+#    # in tests/test_covariance.py
+#
+#    # number of blocks to split the covariance matrix into
+#    n_splits = int(n_features / block_size)
+#    X2 = X**2
+#    emp_cov_trace = tl.sum(X2) / n_samples
+#    mu = emp_cov_trace / n_features
+#    beta_ = tl.tensor(0.0)  # sum of the coefficients of <X2.T, X2>
+#    delta_ = tl.tensor(0.0)  # sum of the *squared* coefficients of <X.T, X>
+#    # starting block computation
+#    for i in range(n_splits):
+#        for j in range(n_splits):
+#            rows = slice(block_size * i, block_size * (i + 1))
+#            cols = slice(block_size * j, block_size * (j + 1))
+#            beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, cols]))
+#            delta_ += tl.sum(tl.dot(X.T[rows], X[:, cols]) ** 2)
+#        rows = slice(block_size * i, block_size * (i + 1))
+#        beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, block_size * n_splits :]))
+#        delta_ += tl.sum(tl.dot(X.T[rows], X[:, block_size * n_splits :]) ** 2)
+#    for j in range(n_splits):
+#        cols = slice(block_size * j, block_size * (j + 1))
+#        beta_ += tl.sum(tl.dot(X2.T[block_size * n_splits :], X2[:, cols]))
+#        delta_ += tl.sum(tl.dot(X.T[block_size * n_splits :], X[:, cols]) ** 2)
+#    delta_ += tl.sum(
+#        tl.dot(X.T[block_size * n_splits :], X[:, block_size * n_splits :]) ** 2
+#    )
+#
+#    delta_ /= n_samples**2
+#    beta_ += tl.sum(
+#        tl.dot(X2.T[block_size * n_splits :], X2[:, block_size * n_splits :])
+#    )
+#    # use delta_ to compute beta
+#
+#    beta = 1.0 / (n_features * n_samples) * (beta_ / n_samples - delta_)
+#    # delta is the sum of the squared coefficients of (<X.T,X> - mu*Id) / p
+#    delta = delta_ - 2.0 * mu * emp_cov_trace + n_features * mu**2
+#    delta /= n_features
+#    # get final beta as the min between beta and delta
+#    # We do this to prevent shrinking more than "1", which would invert
+#    # the value of covariances
+#    # beta = tl.min(tl.tensor([beta, delta]))
+#    # finally get shrinkage
+#    # shrinkage = 0 if beta == 0 else beta / delta
+#    shrinkage = beta / delta
+#    #shrinkage = min(shrinkage, 1)
+#    #shrinkage = max(shrinkage, 0)
+#    shrinkage = tl.clip(shrinkage, a_min=0, a_max=1)
+#    return shrinkage
 
-    if X.shape[0] == 1:
-        warnings.warn(
-            "Only one sample available. You may want to reshape your data array"
-        )
+def ledoit_wolf_shrinkage(X, emp_cov, assume_centered=True):
     n_samples, n_features = X.shape
-
-    # optionally center data
+    if n_features ==1:
+        return 0
     if not assume_centered:
         X = X - X.mean(0)
-
-    # A non-blocked version of the computation is present in the tests
-    # in tests/test_covariance.py
-
-    # number of blocks to split the covariance matrix into
-    n_splits = int(n_features / block_size)
+    
+    mu = tl.trace(emp_cov)/n_features
+    delta_ = emp_cov.copy()
+    shape = delta_.shape
+    delta_flat = tl.base.tensor_to_vec(delta_)
+    delta_flat[::n_features+1] -= mu
+    delta_ = tl.base.vec_to_tensor(delta_, shape)
+    delta = tl.sum(delta_**2) / n_features
     X2 = X**2
-    emp_cov_trace = tl.sum(X2) / n_samples
-    mu = emp_cov_trace / n_features
-    beta_ = tl.tensor(0.0)  # sum of the coefficients of <X2.T, X2>
-    delta_ = tl.tensor(0.0)  # sum of the *squared* coefficients of <X.T, X>
-    # starting block computation
-    for i in range(n_splits):
-        for j in range(n_splits):
-            rows = slice(block_size * i, block_size * (i + 1))
-            cols = slice(block_size * j, block_size * (j + 1))
-            beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, cols]))
-            delta_ += tl.sum(tl.dot(X.T[rows], X[:, cols]) ** 2)
-        rows = slice(block_size * i, block_size * (i + 1))
-        beta_ += tl.sum(tl.dot(X2.T[rows], X2[:, block_size * n_splits :]))
-        delta_ += tl.sum(tl.dot(X.T[rows], X[:, block_size * n_splits :]) ** 2)
-    for j in range(n_splits):
-        cols = slice(block_size * j, block_size * (j + 1))
-        beta_ += tl.sum(tl.dot(X2.T[block_size * n_splits :], X2[:, cols]))
-        delta_ += tl.sum(tl.dot(X.T[block_size * n_splits :], X[:, cols]) ** 2)
-    delta_ += tl.sum(
-        tl.dot(X.T[block_size * n_splits :], X[:, block_size * n_splits :]) ** 2
-    )
-
-    delta_ /= n_samples**2
-    beta_ += tl.sum(
-        tl.dot(X2.T[block_size * n_splits :], X2[:, block_size * n_splits :])
-    )
-    # use delta_ to compute beta
-
-    beta = 1.0 / (n_features * n_samples) * (beta_ / n_samples - delta_)
-    # delta is the sum of the squared coefficients of (<X.T,X> - mu*Id) / p
-    delta = delta_ - 2.0 * mu * emp_cov_trace + n_features * mu**2
-    delta /= n_features
-    # get final beta as the min between beta and delta
-    # We do this to prevent shrinking more than "1", which would invert
-    # the value of covariances
-    # beta = tl.min(tl.tensor([beta, delta]))
-    # finally get shrinkage
-    # shrinkage = 0 if beta == 0 else beta / delta
-    shrinkage = beta / delta
-    shrinkage = min(shrinkage, 1)
-    shrinkage = max(shrinkage, 0)
+    beta_ = (1.0/(n_features*n_samples)*tl.sum(tl.dot(X2.T,X2)/n_samples - emp_cov**2))
+    beta_delta = tl.stack([beta_, delta])
+    beta=tl.min(beta_delta)
+    shrinkage = beta/delta
+    shrinkage = tl.clip(shrinkage, a_min=0.0, a_max=1.0)
     return shrinkage
+
+
 
 
 def oas(emp_cov, n_samples):

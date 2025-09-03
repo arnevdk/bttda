@@ -18,6 +18,7 @@ setup(
             # "seaborn",
             # "numpy<1.24",
             "moabb",
+            "pywavelets",
             "jupyter<4",
             "plotly",
         ]

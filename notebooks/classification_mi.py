@@ -12,8 +12,9 @@ from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.decomposition import PCA
 from mne.time_frequency import tfr_array_morlet
-from meeglet import define_frequencies, define_wavelets, plot_wavelet_family
 import numpy as np
+import pywt
+import scipy.signal
 
 from mne.filter import filter_data
 
@@ -31,11 +32,12 @@ def make_clf():
 
 def get_hoda_params():
     return dict(
-            max_iter=256,
-            toeplitz=(2,),
+            max_iter=512,
+            toeplitz=None,
             taper=False,
             verbose=False,
             refit_shrinkage=True,
+            tol=1e-4,
     )
 
 def get_bttda_params():
@@ -43,41 +45,32 @@ def get_bttda_params():
         hoda_params=get_hoda_params(),
         verbose=False,
         cv=cv,
-        n_jobs=-1,
+        n_jobs=1,
         clf=make_clf()
     )
 
 def stf_transform(X, sfreq=250, target_sfreq=32, f_min=8, f_max=32, n_freqs=16):
-    # define frequencies according to MEEGLET
-    freqs, sigma_time, sigma_freq, bw_oct, qt = define_frequencies(
-        foi_start=f_min, foi_end=f_max, bw_oct=0.5, delta_oct=1/8
-    )
-    n_cycles = freqs/2
-
+ 
+    freqs = np.geomspace(f_min, f_max, n_freqs)
+    wavelet = 'cmor6-1'
+    center_freq = pywt.central_frequency(wavelet)
+    scales = center_freq * sfreq / freqs
+    coeffs, freqs_out = pywt.cwt(X, scales, wavelet, sampling_period=1/sfreq)
+    coeffs = np.moveaxis(coeffs, 0,2)
+    X_tfr = np.log(np.abs(coeffs))
+    downsample_factor = 20
+    n_bins = int(X_tfr.shape[-1]//20)
+    X_tfr_sub = scipy.signal.resample(X_tfr, n_bins, axis=-1)
+    X_tfr_sub = X_tfr_sub[:,:,:,1:-1]
+    return X_tfr_sub
 
     
-    # perform time-frequency transform
-    X_tfr = tfr_array_morlet(X, sfreq, freqs, n_cycles=n_cycles, zero_mean=True, output='complex', n_jobs=1)
-    X_tfr = np.abs(X_tfr)
-    
-    X_tfr_base=  np.log(X_tfr)
-
-
-    # Anti-alias and downsample
-    for fi in range(X_tfr.shape[2]):
-        X_tfr_base[:,:,fi,:] = filter_data(X_tfr_base[:,:,fi,:], sfreq, l_freq=None, h_freq=target_sfreq/2, verbose=False, n_jobs=1)
-    decim = int(np.round(sfreq/target_sfreq))
-    X_tfr_base = X_tfr_base[:,:,:,::decim]
-    X_tfr_base = X_tfr_base[:,:,:,1:-1]
-
-    return X_tfr_base
-
 def get_pipelines_mi():
     pipelines=dict()
 
     
     pipelines['HODA'] = Pipeline([
-        ('tensorly', FunctionTransformer(tl.tensor)),
+        #('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
         ('bttda',BTTDACV(
             max_n_blocks=1,
@@ -90,7 +83,7 @@ def get_pipelines_mi():
     
 
 
-    
+
     pipelines['PARAFACDA'] = Pipeline([
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
@@ -101,7 +94,7 @@ def get_pipelines_mi():
         )),
         ('clf', make_clf())
     ])
-
+    
     pipelines['BTTDA'] = Pipeline([
         ('tensorly', FunctionTransformer(tl.tensor)),
         ('zscore1', ZScore()),
@@ -113,6 +106,6 @@ def get_pipelines_mi():
         )),
         ('clf', make_clf())
     ])
-    
+
     
     return pipelines

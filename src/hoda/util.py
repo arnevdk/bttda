@@ -131,6 +131,8 @@ def ridge_regression(X, Y, lambda_=0):
         target = scale*get_eye(p)
         XTX_plus_lambda_I = scatter + target
         XTy = X.T @ Y
+
+
         W = tl.solve(XTX_plus_lambda_I, XTy)
         return W
 

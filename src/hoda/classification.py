@@ -57,6 +57,8 @@ class SelectFCutoff(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         self.scores_, self.p_values_ = f_classif(X,y)
+        self.scores_[np.isinf(self.scores_)] = 0
+        self.scores_[np.isnan(self.scores_)] = 0
         self.support_ = self.scores_ > self.cutoff
         if not np.any(self.support_):
             self.support_ = np.zeros(len(self.support_), dtype=bool)
@@ -186,7 +188,6 @@ class BTTDACV(BTTDA):
         for fold, (train_idc, test_idc) in enumerate(cv.split(X,y)):
             for theta in thetas:
                 args_list.append((X,y,fold,train_idc, test_idc, theta, clf, scorer))
-        #with joblib.parallel_backend('loky'):
         results = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
             delayed(self._eval_bttdacv_search_fold)(*args) for args in args_list)
         return pd.concat(results, ignore_index=True)
