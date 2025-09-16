@@ -115,7 +115,7 @@ def validate(X, y=None):
 
     if not tl.is_tensor(X):
         X = tl.tensor(X)
-    
+
     return X, y
 
 
@@ -253,6 +253,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     skip=k,
                     transpose=True,
                 )
+                print(X_centered_proj.shape)
 
                 if isinstance(self.shrinkage, tuple):
                     shrinkage = self.shrinkage[k]
@@ -323,7 +324,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 converged = update < self.tol and converged
 
-                #if np.any(np.isnan(u)):
+                # if np.any(np.isnan(u)):
                 #    raise LinAlgError("NaN in weights")
 
                 self.weights_[k] = u
@@ -385,18 +386,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 modes = range(1, order + 1)
                 G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
                 # Regress actvation pattern
-                #Xk = tl.unfold(X, k + 1)
-                #Gk = tl.unfold(G, k + 1)
+                # Xk = tl.unfold(X, k + 1)
+                # Gk = tl.unfold(G, k + 1)
                 ## TODO: regularization
-                #lambda_ = 0.0
-                #ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
+                # lambda_ = 0.0
+                # ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
 
                 # Least squares regression
-                modes = tuple([kk for kk in range(order+1) if kk != k+1])
-                XTX = tl.tenalg.tensordot(G,G,modes)
-                XTY = tl.tenalg.tensordot(G,X, modes)
-                ap =  tl.solve(XTX, XTY).T
-
+                modes = tuple([kk for kk in range(order + 1) if kk != k + 1])
+                XTX = tl.tenalg.tensordot(G, G, modes)
+                XTY = tl.tenalg.tensordot(G, X, modes)
+                ap = tl.solve(XTX, XTY).T
 
                 # Calculate update
                 update = tl.norm(ap - self.aps_[k])
@@ -404,7 +404,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
                 # if k < order-1:
                 #    ap *= tl.sign(ap[0,0])
-                #if np.any(np.isnan(ap)):
+                # if np.any(np.isnan(ap)):
                 #    raise LinAlgError("NaN in aps")
                 self.aps_[k] = ap
                 converged = update < self.tol and converged
@@ -415,7 +415,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     mode=k + 1,
                     flip=(i - 1) * order + k + 1,
                     update=float(update),
-                    #lambda_=float(lambda_),
+                    # lambda_=float(lambda_),
                 )
                 if self.extra_train_info:
                     Xt = self.transform(X)

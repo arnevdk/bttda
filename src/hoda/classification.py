@@ -1,24 +1,24 @@
 import math
-import pandas as pd
 import pdb
-
-import numpy as np
-import tensorly as tl
-from kneed import KneeLocator
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.pipeline import make_pipeline
-from sklearn.model_selection import StratifiedKFold
-from joblib import Parallel, delayed
-import joblib
-from hoda.tensorize import vec
-from hoda.hoda import BTTDA, f_oneway
-from sklearn.metrics import get_scorer
-from sklearn.base import clone
-from sklearn.feature_selection import SelectFdr, f_classif
 import warnings
 
+import joblib
+import numpy as np
+import pandas as pd
+import tensorly as tl
+from joblib import Parallel, delayed
+from kneed import KneeLocator
+from sklearn.base import (BaseEstimator, ClassifierMixin, TransformerMixin,
+                          clone)
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.feature_selection import SelectFdr, f_classif
+from sklearn.metrics import get_scorer
+from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
+
+from hoda.hoda import BTTDA, f_oneway
+from hoda.tensorize import vec
 
 try:
     from toeplitzlda.classification import ToeplitzLDA
@@ -28,8 +28,8 @@ except ImportError:
 
 class ZScore(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
-        self.mean_ = tl.mean(X, axis=(0,-1))
-        self.std_ = np.std(X, axis=(0,-1))
+        self.mean_ = tl.mean(X, axis=(0, -1))
+        self.std_ = np.std(X, axis=(0, -1))
         return self
 
     def transform(self, X, y=None):
@@ -38,25 +38,27 @@ class ZScore(BaseEstimator, TransformerMixin):
         std = self.std_.reshape(shape)
         return (X - mean) / std
 
+
 class ZLogRatio(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
-        self.mean_ = np.mean(X, axis=(0,-1))
-        self.std_log_ = np.std(np.log10(X), axis=(0,-1))
+        self.mean_ = np.mean(X, axis=(0, -1))
+        self.std_log_ = np.std(np.log10(X), axis=(0, -1))
         return self
 
     def transform(self, X, y=None):
         shape = (1, *(X.shape[1:-1]), 1)
         mean = self.mean_.reshape(shape)
         std_log = self.std_log_.reshape(shape)
-        return np.log10(X/mean)/std_log
+        return np.log10(X / mean) / std_log
+
 
 class SelectFCutoff(BaseEstimator, TransformerMixin):
 
     def __init__(self, cutoff=1):
-        self.cutoff=cutoff
+        self.cutoff = cutoff
 
     def fit(self, X, y=None):
-        self.scores_, self.p_values_ = f_classif(X,y)
+        self.scores_, self.p_values_ = f_classif(X, y)
         self.scores_[np.isinf(self.scores_)] = 0
         self.scores_[np.isnan(self.scores_)] = 0
         self.support_ = self.scores_ > self.cutoff
@@ -67,7 +69,6 @@ class SelectFCutoff(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None):
         return X[:, self.support_]
-
 
 
 class SelectFdrMin1(SelectFdr):
@@ -81,12 +82,11 @@ class SelectFdrMin1(SelectFdr):
             support = np.where(support)[0]
         return support
 
+
 class SelectFKneepoint(TransformerMixin):
 
     def fit(self, X, y):
-        f, p = f_classif(X,y)
-        print(f)
-        print(p)
+        f, p = f_classif(X, y)
 
         return self
 
@@ -122,23 +122,25 @@ class BTTDACV(BTTDA):
         extra_train_info=False,
         verbose=False,
         forward=True,
+        fixed_n_blocks=False,
     ):
-        self.max_n_blocks=max_n_blocks
-        self.thetas=thetas
-        self.clf=clf
-        self.scorer=scorer
+        self.max_n_blocks = max_n_blocks
+        self.thetas = thetas
+        self.clf = clf
+        self.scorer = scorer
         self.cv = cv
-        self.n_jobs=n_jobs
+        self.n_jobs = n_jobs
         self.hoda_params = hoda_params
         self.verbose = verbose
         self.extra_train_info = extra_train_info
         self.forward = forward
+        self.fixed_n_blocks = fixed_n_blocks
 
     def fit(self, X, y=None):
         # Set thetas
         thetas = self.thetas
         if thetas is None:
-            thetas = np.arange(0,1+0.1, 0.1)
+            thetas = np.arange(0, 1 + 0.1, 0.1)
         # Set classifier
         clf = self.clf
         if clf is None:
@@ -149,61 +151,70 @@ class BTTDACV(BTTDA):
         n_classes = len(np.unique(y))
         if scorer is None:
             if n_classes > 2:
-                scorer = get_scorer('accuracy')
+                scorer = get_scorer("accuracy")
             else:
-                scorer = get_scorer('roc_auc')
+                scorer = get_scorer("roc_auc")
         cv = self.cv
         if cv is None:
             cv = StratifiedKFold()
 
-        self.results_ = self._gridsearch(X,y,thetas, clf, cv, scorer)
-        opt_theta, opt_n_blocks = self.results_.groupby(['theta', 'n_blocks']).test_score.aggregate('mean').idxmax()
-        
-        self.ranks = [None]*opt_n_blocks
+        self.results_ = self._gridsearch(X, y, thetas, clf, cv, scorer)
+        opt_theta, opt_n_blocks = (
+            self.results_.groupby(["theta", "n_blocks"])
+            .test_score.aggregate("mean")
+            .idxmax()
+        )
+
+        if self.fixed_n_blocks:
+            opt_n_blocks = self.max_n_blocks
+
+        self.ranks = [None] * opt_n_blocks
         if self.hoda_params is None:
             self.hoda_params = dict()
-        self.hoda_params['theta'] = opt_theta
+        self.hoda_params["theta"] = opt_theta
         if self.verbose:
-            print(f'Fitting BTTDA with theta={opt_theta}, n_blocks={opt_n_blocks}')
-        return super().fit(X,y)
+            print(f"Fitting BTTDA with theta={opt_theta}, n_blocks={opt_n_blocks}")
+        return super().fit(X, y)
 
     def _make_bttda(self, theta):
         hoda_params = self.hoda_params
         if hoda_params is None:
             hoda_params = dict()
         hoda_params = hoda_params.copy()
-        hoda_params['theta'] = theta
+        hoda_params["theta"] = theta
         bttda = BTTDA(
-                ranks=[None]*self.max_n_blocks,
-                hoda_params=hoda_params,
-                verbose=self.verbose,
-                extra_train_info=False,
-                forward=False
-            )
+            ranks=[None] * self.max_n_blocks,
+            hoda_params=hoda_params,
+            verbose=self.verbose,
+            extra_train_info=False,
+            forward=False,
+        )
         return bttda
- 
 
-    def _gridsearch(self, X,y, thetas, clf, cv, scorer):
+    def _gridsearch(self, X, y, thetas, clf, cv, scorer):
         args_list = []
-        for fold, (train_idc, test_idc) in enumerate(cv.split(X,y)):
+        for fold, (train_idc, test_idc) in enumerate(cv.split(X, y)):
             for theta in thetas:
-                args_list.append((X,y,fold,train_idc, test_idc, theta, clf, scorer))
+                args_list.append((X, y, fold, train_idc, test_idc, theta, clf, scorer))
         results = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-            delayed(self._eval_bttdacv_search_fold)(*args) for args in args_list)
+            delayed(self._eval_bttdacv_search_fold)(*args) for args in args_list
+        )
         return pd.concat(results, ignore_index=True)
 
-    def _eval_bttdacv_search_fold(self, X,y, fold,  train_idc, test_idc, theta, clf, scorer):
+    def _eval_bttdacv_search_fold(
+        self, X, y, fold, train_idc, test_idc, theta, clf, scorer
+    ):
         if self.verbose:
-            print(f'fold={fold}, theta={theta}')
+            print(f"fold={fold}, theta={theta}")
         clf = clone(clf)
         bttda = self._make_bttda(theta)
         bttda.fit(X[train_idc], y[train_idc])
         result = []
-        for n_blocks in range(1, self.max_n_blocks+1):
+        for n_blocks in range(1, self.max_n_blocks + 1):
             if n_blocks > bttda.n_blocks_:
                 break
             if self.verbose:
-                print(f'fold={fold}, theta={theta}, n_blocks={n_blocks}')
+                print(f"fold={fold}, theta={theta}, n_blocks={n_blocks}")
             Xt = bttda.transform(X, n_blocks=n_blocks)
             try:
                 clf.fit(Xt[train_idc], y[train_idc])
@@ -212,14 +223,8 @@ class BTTDACV(BTTDA):
                 warnings.warn(str(e))
                 break
 
-            result.append(dict(
-                fold=fold,
-                theta=theta,
-                n_blocks=n_blocks,
-                test_score = test_score
-            ))
+            result.append(
+                dict(fold=fold, theta=theta, n_blocks=n_blocks, test_score=test_score)
+            )
         result = pd.DataFrame(result)
         return result
- 
-
-

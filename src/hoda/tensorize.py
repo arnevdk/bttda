@@ -2,6 +2,7 @@ import pdb
 
 import numpy as np
 import scipy.linalg
+import scipy.signal
 import scipy.stats
 import tensorly as tl
 from mne.baseline import rescale
@@ -9,49 +10,52 @@ from mne.filter import filter_data
 from mne.time_frequency import tfr_array_morlet
 from sklearn.base import TransformerMixin
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
-import scipy.signal
-
-import numpy as np
-import scipy.signal
 
 
 def vec(X, y=None, extra=None):
     x = X.reshape((X.shape[0], -1))
     return x
 
+
 def fh_power(X, sfreq=250, target_sfreq=32):
-    X = X.transpose((0,3,1,2))
-    X = np.abs(scipy.signal.hilbert(X))**2
-    factor = sfreq//target_sfreq
+    X = X.transpose((0, 3, 1, 2))
+    X = np.abs(scipy.signal.hilbert(X)) ** 2
+    factor = sfreq // target_sfreq
     X = downsample_last_axis_mean(X, factor)
     return X
+
 
 def fh_log_envelope(X, sfreq=250, target_sfreq=32):
-    X = X.transpose((0,3,1,2))
+    X = X.transpose((0, 3, 1, 2))
     X = np.log(np.abs(scipy.signal.hilbert(X)))
-    factor = sfreq//target_sfreq
+    factor = sfreq // target_sfreq
     X = downsample_last_axis_mean(X, factor)
     return X
-
 
 
 def downsample_last_axis_mean(arr, factor):
     *head, last = arr.shape
     if last % factor != 0:
-        arr = arr[..., :last - (last % factor)]
+        arr = arr[..., : last - (last % factor)]
         last = arr.shape[-1]
     new_shape = (*head, last // factor, factor)
     return arr.reshape(new_shape).mean(axis=-1)
 
 
-def hankel_tensor(X, y=None):
+def hankel_tensor(X, y=None, pad=False):
     n_times = X.shape[-1]
     half = n_times // 2 + 1
 
     def _hankel_nopad(x):
-        return scipy.linalg.hankel(x[:half], x[half - 1 :])
+        return scipy.linalg.hankel(x[:half], x[half:])
 
-    return np.apply_along_axis(_hankel_nopad, -1, X)
+    def _hankel_pad(x):
+        return scipy.linalg.hankel(x, x)
+
+    if pad:
+        return np.apply_along_axis(_hankel_pad, -1, X)
+    else:
+        return np.apply_along_axis(_hankel_nopad, -1, X)
 
 
 def hankel_tensor_inv(Xh, y=None):
@@ -153,6 +157,7 @@ class Tensorize(TransformerMixin):
         if not tl.is_tensor(X):
             X = tl.tensor(X)
         return X
+
 
 def Crop(**params):
     return FunctionTransformer(crop, kw_args=params)

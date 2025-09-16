@@ -62,7 +62,7 @@ def mode_scatter(
             Xf = tl.unfold(X, k + 1)
             shrinkage = ledoit_wolf_shrinkage(
                 Xf.T,
-                scatter/(Xf.shape[1]-1),
+                scatter / (Xf.shape[1] - 1),
                 assume_centered=assume_centered,
             )
     elif shrinkage == "oas":
@@ -96,7 +96,6 @@ def force_toeplitz(A, taper=False):
 
     if taper:
         taper = tl.arange(len(toep), 0, -1) - 1
-        print(taper)
         toep = toep * taper
     if tl.get_backend() == "numpy":
         return scipy.linalg.toeplitz(toep)
@@ -104,11 +103,11 @@ def force_toeplitz(A, taper=False):
         return cupyx.scipy.linalg.toeplitz(toep)
 
 
-#def ledoit_wolf_shrinkage(
+# def ledoit_wolf_shrinkage(
 #    X,
 #    assume_centered=False,
 #    block_size=1000,
-#):
+# ):
 #    """Estimate the shrunk Ledoit-Wolf covariance matrix.
 #    Read more in the :ref:`User Guide <shrunk_covariance>`.
 #    Parameters
@@ -199,29 +198,32 @@ def force_toeplitz(A, taper=False):
 #    shrinkage = tl.clip(shrinkage, a_min=0, a_max=1)
 #    return shrinkage
 
+
 def ledoit_wolf_shrinkage(X, emp_cov, assume_centered=True):
     n_samples, n_features = X.shape
-    if n_features ==1:
+    if n_features == 1:
         return 0
     if not assume_centered:
         X = X - X.mean(0)
-    
-    mu = tl.trace(emp_cov)/n_features
+
+    mu = tl.trace(emp_cov) / n_features
     delta_ = emp_cov.copy()
     shape = delta_.shape
     delta_flat = tl.base.tensor_to_vec(delta_)
-    delta_flat[::n_features+1] -= mu
+    delta_flat[:: n_features + 1] -= mu
     delta_ = tl.base.vec_to_tensor(delta_, shape)
     delta = tl.sum(delta_**2) / n_features
     X2 = X**2
-    beta_ = (1.0/(n_features*n_samples)*tl.sum(tl.dot(X2.T,X2)/n_samples - emp_cov**2))
+    beta_ = (
+        1.0
+        / (n_features * n_samples)
+        * tl.sum(tl.dot(X2.T, X2) / n_samples - emp_cov**2)
+    )
     beta_delta = tl.stack([beta_, delta])
-    beta=tl.min(beta_delta)
-    shrinkage = beta/delta
+    beta = tl.min(beta_delta)
+    shrinkage = beta / delta
     shrinkage = tl.clip(shrinkage, a_min=0.0, a_max=1.0)
     return shrinkage
-
-
 
 
 def oas(emp_cov, n_samples):
