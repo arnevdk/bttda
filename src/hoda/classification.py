@@ -210,7 +210,11 @@ class BTTDACV(BTTDA):
         bttda = self._make_bttda(theta)
         bttda.fit(X[train_idc], y[train_idc])
         result = []
-        for n_blocks in range(1, self.max_n_blocks + 1):
+        if self.fixed_n_blocks:
+            n_blocks_range = [self.max_n_blocks]
+        else:
+            n_blocks_range = range(1, self.max_n_blocks + 1)
+        for n_blocks in n_blocks_range:
             if n_blocks > bttda.n_blocks_:
                 break
             if self.verbose:

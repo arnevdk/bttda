@@ -253,7 +253,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     skip=k,
                     transpose=True,
                 )
-                print(X_centered_proj.shape)
 
                 if isinstance(self.shrinkage, tuple):
                     shrinkage = self.shrinkage[k]
@@ -393,10 +392,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 # ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
 
                 # Least squares regression
-                modes = tuple([kk for kk in range(order + 1) if kk != k + 1])
-                XTX = tl.tenalg.tensordot(G, G, modes)
-                XTY = tl.tenalg.tensordot(G, X, modes)
-                ap = tl.solve(XTX, XTY).T
+                # modes = tuple([kk for kk in range(order + 1) if kk != k + 1])
+                # XTX = tl.tenalg.tensordot(G, G, modes)
+                # XTY = tl.tenalg.tensordot(G, X, modes)
+                # ap = tl.solve(XTX, XTY).T
+
+                Xk = tl.unfold(X, k + 1)
+                Gk = tl.unfold(G, k + 1)
+                # TODO: regularization
+                lambda_ = 0.0
+                ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
 
                 # Calculate update
                 update = tl.norm(ap - self.aps_[k])
