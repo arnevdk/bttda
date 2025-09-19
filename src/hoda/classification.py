@@ -136,7 +136,7 @@ class BTTDACV(BTTDA):
         self.forward = forward
         self.fixed_n_blocks = fixed_n_blocks
 
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, groups=None):
         # Set thetas
         thetas = self.thetas
         if thetas is None:
@@ -158,7 +158,7 @@ class BTTDACV(BTTDA):
         if cv is None:
             cv = StratifiedKFold()
 
-        self.results_ = self._gridsearch(X, y, thetas, clf, cv, scorer)
+        self.results_ = self._gridsearch(X, y, thetas, clf, cv, scorer, groups)
         opt_theta, opt_n_blocks = (
             self.results_.groupby(["theta", "n_blocks"])
             .test_score.aggregate("mean")
@@ -191,9 +191,9 @@ class BTTDACV(BTTDA):
         )
         return bttda
 
-    def _gridsearch(self, X, y, thetas, clf, cv, scorer):
+    def _gridsearch(self, X, y, thetas, clf, cv, scorer, groups):
         args_list = []
-        for fold, (train_idc, test_idc) in enumerate(cv.split(X, y)):
+        for fold, (train_idc, test_idc) in enumerate(cv.split(X, y, groups=groups)):
             for theta in thetas:
                 args_list.append((X, y, fold, train_idc, test_idc, theta, clf, scorer))
         results = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
