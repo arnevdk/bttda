@@ -154,12 +154,19 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     def fit(self, X, y, classes=None, class_counts=None):
         X, y = validate(X, y)
+
         # Calculate means, centering and classes once (slow on GPU)
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
-            class_counts = tl.tensor(class_counts)
+            class_order = np.argsort(self.classes_)
+            self.classes_ = self.classes_[class_order]
+            class_counts = tl.tensor(class_counts[class_order])
         else:
             self.classes_ = classes
+
+        self.classes_, class_counts = np.unique(y, return_counts=True)
+        class_counts = tl.tensor(class_counts)
+
         self.means_, X_centered = center(X, y, self.classes_)
 
         # Fit backward model
@@ -195,7 +202,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         # Determine classes  and center
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
-            class_counts = tl.tensor(class_counts)
+            class_order = np.argsort(self.classes_)
+            self.classes_ = self.classes_[class_order]
+            class_counts = tl.tensor(class_counts[class_order])
         else:
             self.classes_ = classes
         if X_centered is None or means is None:
@@ -564,7 +573,9 @@ class BTTDA(BaseEstimator, TransformerMixin):
         n_samples, *shape = X.shape
 
         self.classes_, class_counts = np.unique(y, return_counts=True)
-        class_counts = tl.tensor(class_counts)
+        class_order = np.argsort(self.classes_)
+        self.classes_ = self.classes_[class_order]
+        class_counts = tl.tensor(class_counts[class_order])
 
         hoda_params = self.hoda_params
         if hoda_params is None:
