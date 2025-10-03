@@ -7,7 +7,7 @@ import math
 
 TIMEOUT = 12*60*60
 
-def create_cluster(cluster='cpu', scale=150, factor=2):
+def create_cluster(cluster='cpu', scale=150, factor=1):
      
     if cluster=='local':
         cluster = LocalCluster(
