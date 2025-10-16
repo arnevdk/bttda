@@ -11,7 +11,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.decomposition import PCA
-from meeglet import define_frequencies, define_wavelets, plot_wavelet_family
 import matplotlib
 import numpy as np
 
