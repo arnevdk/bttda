@@ -37,6 +37,12 @@ class ZScore(BaseEstimator, TransformerMixin):
         mean = self.mean_.reshape(shape)
         std = self.std_.reshape(shape)
         return (X - mean) / std
+    
+    def inv_transform(self, X, y=None):
+        shape = (1, *(X.shape[1:-1]), 1)
+        mean = self.mean_.reshape(shape)
+        std = self.std_.reshape(shape)
+        return (X*std)+mean
 
 
 class ZLogRatio(BaseEstimator, TransformerMixin):

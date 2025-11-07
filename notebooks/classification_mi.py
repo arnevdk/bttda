@@ -49,7 +49,7 @@ def get_bttda_params():
         clf=make_clf()
     )
 
-def stf_transform(X, sfreq=250, target_sfreq=32, f_min=8, f_max=32, n_freqs=16):
+def stf_transform(X, sfreq=250, downsample_factor=20, f_min=8, f_max=32, n_freqs=16):
  
     freqs = np.geomspace(f_min, f_max, n_freqs)
     wavelet = 'cmor6-1'
@@ -58,8 +58,7 @@ def stf_transform(X, sfreq=250, target_sfreq=32, f_min=8, f_max=32, n_freqs=16):
     coeffs, freqs_out = pywt.cwt(X, scales, wavelet, sampling_period=1/sfreq)
     coeffs = np.moveaxis(coeffs, 0,2)
     X_tfr = np.log(np.abs(coeffs))
-    downsample_factor = 20
-    n_bins = int(X_tfr.shape[-1]//20)
+    n_bins = int(X_tfr.shape[-1]//downsample_factor)
     X_tfr_sub = scipy.signal.resample(X_tfr, n_bins, axis=-1)
     X_tfr_sub = X_tfr_sub[:,:,:,1:-1]
     return X_tfr_sub

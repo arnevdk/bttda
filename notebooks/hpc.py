@@ -38,6 +38,7 @@ def create_cluster(cluster=None, scale=150, factor=2):
         cluster.scale(150*n_processes) 
     elif cluster == 'wice_sapphirerapids':
         n_cores = 48*2
+        n_processes = int(math.sqrt(n_cores))
         cluster = SLURMCluster(
             cores=n_cores,
             processes=n_processes,
@@ -55,7 +56,8 @@ def create_cluster(cluster=None, scale=150, factor=2):
                 '--nodes=1',
             ],
         )
-        cluster.scale(150*n_processes)
+        #cluster.scale(150*n_processes)
+        cluster.scale(5*11)
     else:
         raise ValueError
         
