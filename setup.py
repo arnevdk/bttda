@@ -1,13 +1,18 @@
 from setuptools import setup
 
 setup(
-    name="hoda",
+    name="bttda",
     version="0.0.1",
-    description="Reguralized Higher Order Discriminant Analysis",
-    url="https://gitlab.kuleuven.be/compneuro/hoda-bci",
+    description="Block-Term Tensor Discriminant Analysis",
+    url="https://github.com/arnevdk/bttda",
     author="Arne Van Den Kerchove",
     author_email="arne.vandenkerchove@kuleuven.be",
-    install_requires=["scikit-learn", "tensorly", "opt_einsum", "tqdm", "kneed"],
+    install_requires=[
+        "scikit-learn",
+        "tensorly",
+        "opt_einsum",
+        "tqdm",
+    ],
     extras_require={
         "experiments": [
             # "mne<=1.6.1",
@@ -21,6 +26,8 @@ setup(
             "pywavelets",
             "jupyter<4",
             "plotly",
+            "dask",
+            "dask-jobqueue",
         ]
     },
 )

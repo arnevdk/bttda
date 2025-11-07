@@ -28,6 +28,11 @@ pip install git+ssh://git@gitlab.kuleuven.be:compneuro/hoda-bci.git[notebooks]
 jupyter notebook
 ```
 
+```
+CUPY_ACCELERATORS=cutensor,cub
+TENSORLY_BACKEND=cupy
+```
+
 
 
 ## GPU in a container
@@ -41,9 +46,4 @@ jupyter notebook
 
 ## TODO:
 
-* [ ] Implement pruning based on mode update
-* [ ] Script find optimal number of blocks
-* [ ] Script find optimal component selection
 * [ ] Implement tenalg as tl backend
-* [ ] Move figure scripts
-* [ ] Figure out differences between solvers and backends

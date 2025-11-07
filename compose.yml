@@ -1,6 +1,6 @@
 services:
-  hoda-bci:
-    image: localhost/hoda-bci:${TENSORLY_BACKEND:-numpy}
+  bttda-dev:
+    image: localhost/bttda:${TENSORLY_BACKEND:-numpy}
     build:
       context: .
       dockerfile: Containerfile

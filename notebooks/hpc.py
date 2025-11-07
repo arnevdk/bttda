@@ -7,7 +7,7 @@ import math
 
 TIMEOUT = 12*60*60
 
-def create_cluster(cluster=None, scale=150, factor=2):
+def create_cluster(cluster=None, scale=150):
      
     if cluster=='local':
         cluster = LocalCluster(
@@ -56,10 +56,9 @@ def create_cluster(cluster=None, scale=150, factor=2):
                 '--nodes=1',
             ],
         )
-        #cluster.scale(150*n_processes)
-        cluster.scale(5*11)
+        cluster.scale(150*n_processes)
     else:
-        raise ValueError
+        raise ValueError("cluster must be one of: 'local', 'wice', 'wice_sapphirerapids'")
         
     return cluster
 
