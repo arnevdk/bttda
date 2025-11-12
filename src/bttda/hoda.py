@@ -109,7 +109,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         tol=1e-8,
         rank=None,
         shrinkage="lw",
-        refit_shrinkage=False,
         toeplitz=None,
         taper=False,
         obj="tr",
@@ -124,7 +123,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.tol = tol
         self.rank = rank
         self.shrinkage = shrinkage
-        self.refit_shrinkage = refit_shrinkage
         self.toeplitz = toeplitz
         self.obj = obj
         self.solver = solver
@@ -185,12 +183,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         class_counts=None,
     ):
         X, y = self._validate(X, y)
-
-        # TODO: calculate train info for initialization
-        n_samples, *shape = X.shape
+        _, *shape = X.shape
         order = len(shape)
 
-        # Determine classes  and center
+        # Determine classes and means and center data
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
             class_order = np.argsort(self.classes_)
@@ -208,16 +204,75 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
         # Initialize backward projections and covariances
         self._init_backward(X)
-        self.scatter_w_ = [None] * order
-
-        solver_params = self.solver_params
-        if solver_params is None:
-            solver_params = dict()
 
         # Calculate means and center
         means_centered = self.means_ - tl.mean(self.means_, axis=0)
 
         # Calculate total scatter
+        scatter_t = self._calculate_scatter_t(X_centered, class_counts)
+
+        # Iteratively find projections
+        iterator = range(1, self.max_iter + 1)
+        if self.verbose:
+            iterator = tqdm(iterator, position=0, leave=True)
+        for self.iter_ in iterator:
+            converged = True
+            for k in range(order):
+
+                # Alternating partial projection
+                modes = range(1, order + 1)
+                X_centered_proj = tl.tenalg.multi_mode_dot(
+                    X_centered,
+                    self.weights_,
+                    modes=modes,
+                    skip=k,
+                    transpose=True,
+                )
+                means_centered_proj = tl.tenalg.multi_mode_dot(
+                    means_centered, self.weights_, modes=modes, skip=k, transpose=True
+                )
+
+                # Within-class and between-class scatter matrices
+                scatter_w, scatter_b, shrinkage = self._calculate_scatter_wb(
+                    X_centered_proj,
+                    means_centered_proj,
+                    k,
+                    class_counts,
+                )
+
+                # Solve
+                u, w = self._solve_backward_step(k, scatter_w, scatter_b, scatter_t[k])
+
+                # Calculate update and check convergence
+                if u.shape[-1] != self.weights_[k].shape[-1]:
+                    update = np.inf
+                else:
+                    update = tl.norm(self.weights_[k] - u)
+                    update /= tl.norm(self.weights_[k])
+                converged = update < self.tol and converged
+
+                # Assign new weights
+                self.weights_[k] = u
+
+                # Store mode training information
+                self._store_backward_train_info(X, y, k, update, shrinkage, w)
+
+            if self.verbose:
+                iterator.set_description(f"Backward HODA model rank={self.rank_}")
+            # Exit if converged in all modes
+            if converged:
+                break
+
+        # Convert train_info to list dict
+        self.train_info_["backward"] = {
+            k: [dic[k] for dic in self.train_info_["backward"]]
+            for k in self.train_info_["backward"][0]
+        }
+        if not converged:
+            warnings.warn("Maximum number of iterations reached without convergence")
+
+    def _calculate_scatter_t(self, X_centered, class_counts):
+        order = X_centered.ndim - 1
         scatter_t = [None] * order
         for k in range(order):
             scatter_w, shrinkage = mode_scatter(
@@ -233,129 +288,92 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             )
             scatter_t[k] = scatter_w + scatter_b
 
-        # Iteratively find projections
-        shrinkages = [None] * order
-        iterator = range(1, self.max_iter + 1)
-        if self.verbose:
-            iterator = tqdm(iterator, position=0, leave=True)
-        for self.iter_ in iterator:
-            converged = True
-            for k in range(order):
-                modes = range(1, order + 1)
-                X_centered_proj = tl.tenalg.multi_mode_dot(
-                    X_centered,
-                    self.weights_,
-                    modes=modes,
-                    skip=k,
-                    transpose=True,
-                )
+        return scatter_t
 
-                if isinstance(self.shrinkage, tuple):
-                    shrinkage = self.shrinkage[k]
-                else:
-                    shrinkage = self.shrinkage
+    def _calculate_scatter_wb(
+        self, X_centered_proj, means_centered_proj, k, class_counts
+    ):
+        order = X_centered_proj.ndim - 1
+        modes = range(1, order + 1)
+        if isinstance(self.shrinkage, tuple):
+            shrinkage = self.shrinkage[k]
+        else:
+            shrinkage = self.shrinkage
 
-                if not self.refit_shrinkage and shrinkages[k] is not None:
-                    shrinkage = shrinkages[k]
+        # Calculate within class scatter matrix
+        scatter_w, shrinkage = mode_scatter(
+            X_centered_proj,
+            k,
+            assume_centered=True,
+            shrinkage=shrinkage,
+            toeplitz=self.toeplitz,
+            taper=self.taper,
+        )
 
-                scatter_w, shrinkage = mode_scatter(
-                    X_centered_proj,
-                    k,
-                    assume_centered=True,
-                    shrinkage=shrinkage,
-                    toeplitz=self.toeplitz,
-                    taper=self.taper,
-                )
-                shrinkages[k] = float(shrinkage)
+        # Calculate between class scatter matrix
+        scatter_b, _ = mode_scatter(
+            means_centered_proj,
+            k,
+            weights=class_counts,
+            shrinkage=0,
+            assume_centered=True,
+        )
+        return scatter_w, scatter_b, shrinkage
 
-                # Calculate between class scatter
-                means_centered_proj = tl.tenalg.multi_mode_dot(
-                    means_centered, self.weights_, modes=modes, skip=k, transpose=True
-                )
-                scatter_b, _ = mode_scatter(
-                    means_centered_proj,
-                    k,
-                    weights=class_counts,
-                    shrinkage=0,
-                    assume_centered=True,
-                )
+    def _solve_backward_step(self, k, scatter_w, scatter_b, scatter_t):
+        solver_params = self.solver_params
+        if solver_params is None:
+            solver_params = dict()
 
-                # Solve
-                u = self.weights_[k]
-                A, B = OBJECTIVES[self.obj](
-                    scatter_b,
-                    scatter_w,
-                    self.weights_[k],
-                )
+        A, B = OBJECTIVES[self.obj](
+            scatter_b,
+            scatter_w,
+            self.weights_[k],
+        )
 
-                import pdb
+        u, w = solve_gevdh(
+            A,
+            B=B,
+            rank=self.rank_[k],
+            solver=self.solver,
+            which="LA",
+            init=tl.copy(self.weights_[k]),
+            **solver_params,
+        )
 
-                u, w = solve_gevdh(
-                    A,
-                    B=B,
-                    rank=self.rank_[k],
-                    solver=self.solver,
-                    which="LA",
-                    init=tl.copy(self.weights_[k]),
-                    **solver_params,
-                )
+        # Re-orthogonalize
+        u, w = solve_gevdh(
+            u @ u.T @ scatter_t @ u @ u.T,
+            rank=self.rank_[k],
+            solver=self.solver,
+            which="LA",
+            init=tl.copy(self.weights_[k]),
+            **solver_params,
+        )
 
-                # Re-orthogonalize
-                u, w = solve_gevdh(
-                    u @ u.T @ scatter_t[k] @ u @ u.T,
-                    rank=self.rank_[k],
-                    solver=self.solver,
-                    which="LA",
-                    init=tl.copy(self.weights_[k]),
-                    **solver_params,
-                )
+        if np.any(np.isnan(u)):
+            raise LinAlgError("NaN in weights")
 
-                # Calculate update and check convergence
-                if u.shape[-1] != self.weights_[k].shape[-1]:
-                    update = np.inf
-                else:
-                    update = tl.norm(self.weights_[k] - u)
-                    update /= tl.norm(self.weights_[k])
+        return u, w
 
-                converged = update < self.tol and converged
-
-                if np.any(np.isnan(u)):
-                    raise LinAlgError("NaN in weights")
-
-                self.weights_[k] = u
-
-                # Store mode training information
-                train_info_row = dict(
-                    iteration=self.iter_,
-                    mode=k + 1,
-                    flip=(self.iter_ - 1) * order + k + 1,
-                    update=float(update),
-                    shrinkage=float(shrinkage),
-                    objective=float(tl.sum(tl.abs(w))),
-                )
-                self.scatter_w_[k] = scatter_w
-                if self.extra_train_info:
-                    Xt = self.transform(X)
-                    train_info_row.update(backward_stats(Xt, y))
-                self.train_info_["backward"].append(train_info_row)
-
-            if self.verbose:
-                iterator.set_description(f"Backward HODA model rank={self.rank_}")
-            # Exit if converged
-            if converged:
-                break
-        # Convert train_info to list dict
-        self.train_info_["backward"] = {
-            k: [dic[k] for dic in self.train_info_["backward"]]
-            for k in self.train_info_["backward"][0]
-        }
-        if not converged:
-            warnings.warn("Maximum number of iterations reached without convergence")
+    def _store_backward_train_info(self, X, y, k, update, shrinkage, w):
+        order = X.ndim - 1
+        train_info_row = dict(
+            iteration=self.iter_,
+            mode=k + 1,
+            flip=(self.iter_ - 1) * order + k + 1,
+            update=float(update),
+            shrinkage=float(shrinkage),
+            objective=float(tl.sum(tl.abs(w))),
+        )
+        if self.extra_train_info:
+            Xt = self.transform(X)
+            train_info_row.update(backward_stats(Xt, y))
+        self.train_info_["backward"].append(train_info_row)
 
     def fit_forward(self, X, y, X_centered=None, Xt=None):
         X, y = self._validate(X, y)
-
-        n_samples, *shape = X.shape
+        _, *shape = X.shape
         order = len(shape)
 
         # Project
@@ -366,57 +384,31 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self._init_forward()
         self.train_info_["forward"] = []
 
-        # Calculate forward model
         iterator = range(1, self.max_iter)
         if self.verbose:
             iterator = tqdm(iterator, position=0, leave=True)
             iterator.set_description("Forward model ")
         update = np.inf
-
-        shrinkages = [None] * order
         for i in iterator:
             converged = True
             for k in range(order):
-                # Partially project core tensor
+
+                # Alternating partial projection
                 modes = range(1, order + 1)
                 G = tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes, skip=k)
 
-                # Least squares regression
-                # modes = tuple([kk for kk in range(order + 1) if kk != k + 1])
-                # XTX = tl.tenalg.tensordot(G, G, modes)
-                # XTY = tl.tenalg.tensordot(G, X, modes)
-                # ap = tl.solve(XTX, XTY).T
+                ap, lambda_ = self._solve_forward_step(X, G, k)
 
-                # Ridge regression
-                Xk = tl.unfold(X, k + 1)
-                Gk = tl.unfold(G, k + 1)
-                # TODO: regularization
-                lambda_ = 0.0
-                ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
-
-                # Calculate update
+                # Calculate update and convergence
                 update = tl.norm(ap - self.aps_[k])
                 update /= tl.norm(self.aps_[k])
-
-                if np.any(np.isnan(ap)):
-                    raise LinAlgError("NaN in aps")
-                self.aps_[k] = ap
                 converged = update < self.tol and converged
 
-                # Store training info
-                train_info_row = dict(
-                    iteration=i,
-                    mode=k + 1,
-                    flip=(i - 1) * order + k + 1,
-                    update=float(update),
-                    lambda_=float(lambda_),
-                )
-                if self.extra_train_info:
-                    Xt = self.transform(X)
-                    X_approx = self.inv_transform(Xt)
-                    train_info_row.update(forward_stats(X, Xt, X_approx, y))
-                self.train_info_["forward"].append(train_info_row)
+                # Set new activation pattern
+                self.aps_[k] = ap
 
+                # Store training info
+                self._store_forward_train_info(X, y, i, k, update, lambda_)
             if converged:
                 break
 
@@ -424,6 +416,39 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             k: [dic[k] for dic in self.train_info_["forward"]]
             for k in self.train_info_["forward"][0]
         }
+
+    def _solve_forward_step(self, X, G, k, lambda_=0.0):
+        # Least squares regression
+        # modes = tuple([kk for kk in range(order + 1) if kk != k + 1])
+        # XTX = tl.tenalg.tensordot(G, G, modes)
+        # XTY = tl.tenalg.tensordot(G, X, modes)
+        # ap = tl.solve(XTX, XTY).T
+
+        # Ridge regression
+        Xk = tl.unfold(X, k + 1)
+        Gk = tl.unfold(G, k + 1)
+        # TODO: regularization
+        ap = ridge_regression(Gk.T, Xk.T, lambda_=lambda_).T
+
+        if np.any(np.isnan(ap)):
+            raise LinAlgError("NaN in aps")
+
+        return ap, lambda_
+
+    def _store_forward_train_info(self, X, y, i, k, update, lambda_):
+        order = X.ndim - 1
+        train_info_row = dict(
+            iteration=i,
+            mode=k + 1,
+            flip=(i - 1) * order + k + 1,
+            update=float(update),
+            lambda_=float(lambda_),
+        )
+        if self.extra_train_info:
+            Xt = self.transform(X)
+            X_approx = self.inv_transform(Xt)
+            train_info_row.update(forward_stats(X, Xt, X_approx, y))
+        self.train_info_["forward"].append(train_info_row)
 
     def _init_backward(self, X):
         _, *shape = X.shape
@@ -476,7 +501,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None):
-        X, y = self._validate(Xt, y)
+        Xt, y = self._validate(Xt, y)
         order = Xt.ndim - 1
         modes = [k + 1 for k in range(order)]
         return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes)

@@ -24,7 +24,6 @@ def get_hoda_params():
         toeplitz=(1,),
         taper=False,
         verbose=False,
-        refit_shrinkage=True,
         solver="lanczos",
     )
 

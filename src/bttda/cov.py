@@ -54,7 +54,7 @@ def mode_scatter(
         raise NotImplementedError
     elif shrinkage == "loocv":
         raise NotImplementedError
-    else:
+    elif isinstance(shrinkage, str):
         raise ValueError(
             "shrinkage should be either float or one of ['lw', 'oas', 'ss', 'ell1', 'ell2', 'ell3', 'loocv']"
         )
