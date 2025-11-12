@@ -9,7 +9,7 @@ from bttda.util import get_eye, toeplitz
 def mode_scatter(
     X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
 ):
-    """Calculate the scatter matrix along a given tensor mode"""
+    """Calculate the scatter matrix along a given tensor mode."""
 
     n_samples, *shape = X.shape
     order = len(shape)
@@ -53,7 +53,11 @@ def mode_scatter(
     elif shrinkage == "ell3":
         raise NotImplementedError
     elif shrinkage == "loocv":
-        raise NotImplemented
+        raise NotImplementedError
+    else:
+        raise ValueError(
+            "shrinkage should be either float or one of ['lw', 'oas', 'ss', 'ell1', 'ell2', 'ell3', 'loocv']"
+        )
 
     trace = tl.trace(scatter)
     scale = trace / n_features
@@ -126,7 +130,3 @@ def oas(emp_cov, n_samples):
     shrinkage = min(shrinkage, 1)
     shrinkage = max(shrinkage, 0)
     return shrinkage
-
-
-def schaefer_strimmer_shrinkage(X, k):
-    raise NotImplementedError

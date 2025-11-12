@@ -15,19 +15,16 @@ setup(
     ],
     extras_require={
         "experiments": [
-            # "mne<=1.6.1",
-            # "pyyaml<5.4",
-            # "moabb==1.1.0",
-            # "matplotlib<3.9",
-            # "jupyter",
-            # "seaborn",
-            # "numpy<1.24",
             "moabb",
+            "filelock",
             "pywavelets",
             "jupyter<4",
             "plotly",
+        ],
+        "hpc": [
             "dask",
             "dask-jobqueue",
-        ]
+            "bokeh",
+        ],
     },
 )

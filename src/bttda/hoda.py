@@ -9,8 +9,10 @@ from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from tqdm import tqdm
 
 from bttda.cov import mode_scatter
-from bttda.util import (center, flip_signs, norm_fro, ridge_regression,
-                        solve_gevdh)
+from bttda.util import center, norm_fro, ridge_regression, solve_gevdh
+
+tl.tenalg.set_backend("einsum")
+tl.plugins.use_opt_einsum()
 
 
 def obj_rt(scatter_b, scatter_w, _):
@@ -97,13 +99,6 @@ OBJECTIVES = dict(
 
 
 def validate(X, y=None):
-    tl.initialize_backend()
-    tl.tenalg.set_backend("einsum")
-    tl.plugins.use_opt_einsum()
-
-    if not tl.is_tensor(X):
-        X = tl.tensor(X)
-
     return X, y
 
 
@@ -111,7 +106,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def __init__(
         self,
         max_iter=256,
-        tol=1e-6,
+        tol=1e-8,
         rank=None,
         shrinkage="lw",
         refit_shrinkage=False,
@@ -140,9 +135,17 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.theta = theta
         self.forward = forward
 
-    def fit(self, X, y, classes=None, class_counts=None):
-        X, y = validate(X, y)
+    def _validate(self, X, y=None):
+        if not tl.is_tensor(X):
+            raise ValueError("X must be a tensorly tensor object")
+        if self.theta is None and self.rank is None:
+            raise ValueError("Either theta or rank must be set.")
+        if self.obj not in OBJECTIVES.keys():
+            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
+        return X, y
 
+    def fit(self, X, y, classes=None, class_counts=None):
+        X, y = self._validate(X, y)
         # Calculate means, centering and classes once (slow on GPU)
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -181,7 +184,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         classes=None,
         class_counts=None,
     ):
-        X, y = validate(X, y)
+        X, y = self._validate(X, y)
 
         # TODO: calculate train info for initialization
         n_samples, *shape = X.shape
@@ -204,13 +207,9 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.train_info_ = dict(backward=[])
 
         # Initialize backward projections and covariances
-        # self._init(X,y, classes=classes, class_counts=class_counts, X_centered=X_centered, means=means)
         self._init_backward(X)
         self.scatter_w_ = [None] * order
 
-        # Determine solver parameters
-        if self.obj not in OBJECTIVES.keys():
-            raise ValueError(f"objective must be one of {list(OBJECTIVES.keys())}")
         solver_params = self.solver_params
         if solver_params is None:
             solver_params = dict()
@@ -289,6 +288,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                     self.weights_[k],
                 )
 
+                import pdb
+
                 u, w = solve_gevdh(
                     A,
                     B=B,
@@ -313,10 +314,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 if u.shape[-1] != self.weights_[k].shape[-1]:
                     update = np.inf
                 else:
-                    old = flip_signs(self.weights_[k])
-                    new = flip_signs(u)
-                    update = tl.norm(new - old)
-                    update /= tl.norm(old)
+                    update = tl.norm(self.weights_[k] - u)
+                    update /= tl.norm(self.weights_[k])
 
                 converged = update < self.tol and converged
 
@@ -354,7 +353,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             warnings.warn("Maximum number of iterations reached without convergence")
 
     def fit_forward(self, X, y, X_centered=None, Xt=None):
-        X, y = validate(X, y)
+        X, y = self._validate(X, y)
 
         n_samples, *shape = X.shape
         order = len(shape)
@@ -469,7 +468,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.aps_.append(tl.copy(w))
 
     def transform(self, X, y=None):
-        X, y = validate(X, y)
+        X, y = self._validate(X, y)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
             X, self.weights_, modes=range(1, order + 1), transpose=True
@@ -477,7 +476,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None):
-        X, y = validate(Xt, y)
+        X, y = self._validate(Xt, y)
         order = Xt.ndim - 1
         modes = [k + 1 for k in range(order)]
         return tl.tenalg.multi_mode_dot(Xt, self.aps_, modes=modes)
@@ -651,6 +650,7 @@ def f_multiway(
     assume_centered=False,
     means=None,
     method="tr",
+    solver=None,
 ):
     n_samples, *shape = X.shape
     if not tl.is_tensor(X):
@@ -686,7 +686,7 @@ def f_multiway(
             scatter_b,
             scatter_w,
             rank=X_centered_flat.shape[-1],
-            solver="lanczos",
+            solver="lobpcg",
             eigvals_only=True,
         )
         F = tl.sum(w)

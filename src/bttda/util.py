@@ -1,11 +1,7 @@
-import math
-import warnings
-
 import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg
 import tensorly as tl
-from scipy.sparse.linalg import ArpackError, ArpackNoConvergence
 
 try:
     import cupy
@@ -25,6 +21,8 @@ def toeplitz(A):
         return scipy.linalg.toeplitz(A)
     elif tl.get_backend() == "cupy":
         return cupyx.scipy.linalg.toeplitz(A)
+    else:
+        raise NotImplementedError
 
 
 def solve_gevdh(
@@ -35,50 +33,34 @@ def solve_gevdh(
     eigvals_only=False,
     which="LA",
     init=None,
-    tol=1e-16,
-    **solver_params
+    **solver_params,
 ):
     if rank is None:
         rank = A.shape[0]
 
     if solver == "lanczos":
-        if tl.get_backend() == "numpy":
-            w, v = scipy.linalg.eigh(A, b=B)
-        elif tl.get_backend() == "cupy":
-            C = A
-            if B is not None:
-                C = tl.solve(B, A)
-            w, v = cupy.linalg.eigh(C)
-        else:
-            raise NotImplementedError
-
-        # Truncate
-        if which == "LM":
-            idc = tl.argsort(-tl.abs(w))[:rank]
-        elif which == "LA":
-            w, v = w[-rank:], v[:, -rank:]
-        elif which == "SM":
-            idc = tl.argsort(tl.abs(w))[:rank]
-        elif which == "SA":
-            w, v = w[:rank], v[:, :rank]
-
-            # if rank==C.shape[0]:
-            #    w,v = cupy.linalg.eigh(C)
-            # else:
-            #    w,v = cupyx.scipy.sparse.linalg.eigsh(
-            #        C, k=rank,
-            #        which=which,
-            #        return_eigenvectors=~eigvals_only,
-            #    )
-            #    if np.any(np.isnan(w)):
-            #        warnings.warn('cupyx.scipy.sparse.linalg.eigsh failed, using cupy.linalg.eigh')
-            #        w,v = cupy.linalg.eigh(C)
-    if solver == "svd":
+        w, v = _solve_lanczos(A, B=B, **solver_params)
+    elif solver == "lobpcg":
+        w, v = _solve_lobpcg(A, B=B, rank=rank, init=init, **solver_params)
+    elif solver == "svd":
+        # Can only be used with symmetric SPD objective
         raise NotImplementedError
-    if solver == "lobpcg":
-        raise NotImplementedError
-    if eigvals_only:
-        return w
+    else:
+        raise ValueError("(g)evd solver must be on of ['lanczos', 'lobpcg', 'svd']")
+
+    # Truncate
+    if which == "LM":
+        order = tl.argsort(-tl.abs(w))
+    elif which == "LA":
+        order = tl.argsort(-w)
+    elif which == "SM":
+        order = tl.argsort(tl.abs(w))
+    elif which == "SA":
+        order = tl.argsort(w)
+    else:
+        raise ValueError("which must be one of ['LM', 'LA', 'SM', 'SA']")
+    w = w[order[:rank]]
+    v = v[:, order[:rank]]
 
     # this does not run fast on the GPU
     # min_ev = tl.min(tl.abs(w))
@@ -88,7 +70,54 @@ def solve_gevdh(
     #     warnings.warn('completing incomplete basis with orthogonal vectors')
     #     basis_completion =  complete_orthonormal_basis(v[:,~null_idc], rank)
     #     v[:,null_idc] = basis_completion
+    if eigvals_only:
+        return w
+
+    v /= tl.norm(v, axis=0)
+    v = flip_signs(v)
     return v, w
+
+
+def _solve_lanczos(A, B=None, **solver_params):
+    if tl.get_backend() == "numpy":
+        w, v = scipy.linalg.eigh(A, b=B, **solver_params)
+    elif tl.get_backend() == "cupy":
+        if B is None:
+            w, v = cupy.linalg.eigh(A, **solver_params)
+        else:
+            import pdb
+
+            pdb.set_trace()
+            # L = cupy.linalg.cholesky(B)
+            # Y = cupy.linalg.solve(L, A)
+            # V = cupy.linalg.solve(L.T, Y)
+            # wy, vy = cupy.linalg.eigh(V.T @ A @ V, **solver_params)
+            # v = V @ vy
+            # w = cupy.empty_like(wy)
+
+            # C = tl.solve(B, A)
+            # w, v = cupy.linalg.eigh(C, **solver_params)
+            raise NotImplementedError(
+                "Lanczos solver for generalized evd is not available for the cupy tensorly backend"
+            )
+    else:
+        raise NotImplementedError
+    return w, v
+
+
+def _solve_lobpcg(A, B=None, rank=None, init=None, **solver_params):
+    if init is None:
+        init = A
+    if rank is None:
+        rank = A.shape[1]
+    init = init[:, :rank]
+    if tl.get_backend() == "numpy":
+        w, v, *_ = scipy.sparse.linalg.lobpcg(A, init, B=B, **solver_params)
+    elif tl.get_backend() == "cupy":
+        w, v, *_ = cupyx.scipy.sparse.linalg.lobpcg(A, init, B=B, **solver_params)
+    else:
+        raise NotImplementedError
+    return w, v
 
 
 def center(X, y, classes=None):
@@ -100,38 +129,42 @@ def center(X, y, classes=None):
 
     means = tl.zeros((n_classes, *shape))
 
-    # Faster on GPU
-    #    if tl.get_backend() == "cupy":
-    #        X_centered = tl.zeros((n_classes, *X.shape))
-    #        full_nan = cupy.full_like(X, cupy.nan)
-    #        for ci, c in enumerate(classes):
-    #            where = tl.tensor(y==c)
-    #            where = cupy.expand_dims(where, axis=tuple(np.arange(1, order + 1)))
-    #            X_where = cupy.where(
-    #                where,
-    #                X,
-    #                full_nan,
-    #            )
-    #            means[ci] = cupy.nanmean(X_where, axis=0)
-    #            X_centered[ci] = X_where - means[ci]
-    #        X_centered = cupy.nansum(X_centered, axis=0)
-    #    else:
-    #        X_centered = []
-    #        for ci, c in enumerate(classes):
-    #            X_where = X[y == c]
-    #            means[ci] = tl.mean(X_where, axis=0)
-    #            X_centered.append(X_where - means[ci])
-    #        X_centered = tl.concatenate(X_centered, axis=0)
-
     if tl.get_backend() == "cupy":
-        X_centered = cupy.zeros_like(X)
-    elif tl.get_backend() == "numpy":
-        X_centered = np.zeros_like(X)
+        # Faster on GPU
+        X_centered = tl.zeros((n_classes, *X.shape))
+        full_nan = cupy.full_like(X, cupy.nan)
+        for ci, c in enumerate(classes):
+            where = tl.tensor(y == c)
+            where = cupy.expand_dims(where, axis=tuple(np.arange(1, order + 1)))
+            X_where = cupy.where(
+                where,
+                X,
+                full_nan,
+            )
+            means[ci] = cupy.nanmean(X_where, axis=0)
+            X_centered[ci] = X_where - means[ci]
+        X_centered = cupy.nansum(X_centered, axis=0)
     else:
-        raise ValueError
-    for ci, c in enumerate(classes):
-        means[ci] = tl.mean(X[y == c], axis=0)
-        X_centered[y == c] = X[y == c] - means[ci]
+        X_centered = []
+        for ci, c in enumerate(classes):
+            X_where = X[y == c]
+            means[ci] = tl.mean(X_where, axis=0)
+            X_centered.append(X_where - means[ci])
+        X_centered = tl.concatenate(X_centered, axis=0)
+    if tl.get_backend() == "numpy":
+        X_centered = np.zeros_like(X)
+        for ci, c in enumerate(classes):
+            means[ci] = tl.mean(X[y == c], axis=0)
+            X_centered[y == c] = X[y == c] - means[ci]
+
+    # if tl.get_backend() == "cupy":
+    #    X_centered = cupy.zeros_like(X)
+    # elif tl.get_backend() == "numpy":
+    # else:
+    #    raise ValueError
+    # for ci, c in enumerate(classes):
+    #    means[ci] = tl.mean(X[y == c], axis=0)
+    #    X_centered[y == c] = X[y == c] - means[ci]
 
     return means, X_centered
 
@@ -147,8 +180,7 @@ def ridge_regression(X, Y, lambda_=0):
     Returns:
     W: The ridge regression weight matrix (p x m)
     """
-    n, p = X.shape
-    _, m = Y.shape
+    _, p = X.shape
     scatter = X.T @ X
     scale = lambda_ * tl.trace(scatter)
     target = scale * get_eye(p)
@@ -160,16 +192,17 @@ def ridge_regression(X, Y, lambda_=0):
 
 
 def get_eye(n_features):
-    """Cache identity matrix to avoid recomputing it multiple times."""
+    """Cache identity matrix to avoid reallocating it multiple times."""
     if not hasattr(get_eye, "cache"):
         get_eye.cache = {}  # Initialize cache
+    key = f"{tl.get_backend}-{n_features}"
     if n_features not in get_eye.cache:
-        get_eye.cache[n_features] = tl.eye(n_features)  # Store once
-    return get_eye.cache[n_features]
+        get_eye.cache[key] = tl.eye(n_features)  # Store once
+    return get_eye.cache[key]
 
 
 def flip_signs(u):
-    n_rows, n_cols = u.shape
+    n_rows, _ = u.shape
     ones = tl.ones(n_rows)
     signs = tl.sign(u.T @ ones)
     return u * signs
@@ -178,17 +211,16 @@ def flip_signs(u):
 def complete_orthonormal_basis(Q, target_dim):
     """
     Given a set of linearly independent vectors in A, complete it to an orthonormal basis
-    of dimension 'target_dim' using standard basis vectors if necessary.
+    of dimension `target_dim` using standard basis vectors if necessary.
     """
     Q = Q.copy()
     m, n = Q.shape
-
-    # Step 2: Add standard basis vectors to complete the basis
-    standard_basis = tl.eye(m)  # Standard basis vectors (identity matrix columns)
+    standard_basis = tl.eye(m)
 
     for i in range(m):
+        # Break if the target dimension is reached
         if Q.shape[1] >= target_dim:
-            break  # Stop if we've reached the target rank
+            break
 
         candidate = standard_basis[:, i]  # Pick a standard basis vector
 

@@ -35,6 +35,7 @@ def get_hoda_params():
         verbose=False,
         refit_shrinkage=True,
         tol=1e-4,
+        solver="lanczos",
     )
 
 

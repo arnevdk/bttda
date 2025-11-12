@@ -1,49 +1,76 @@
-# hoda-bci
+# BTTDA: Block-Term-Tensor Discriminant Analysis
 
-Implementation of regularized Toeplitz Higher Order Discriminant Analysis for Brain-Computer Interface classification
+Python implementation of Block-Term-Tensor Discriminant Analysis (BTTDA), a tensor classification and dimensionality reduction algorithm based on the Block-Term decomposition an Higher-Order Discriminant Analysis. BTTDA iteratively decomposes the input data in discriminant core tensors using a deflation scheme. See [arxiv.org/abs/2511.04292](https://arxiv.org/abs/2511.04292) for the main publication. 
+This package also provides python implementations for Higher Order Discriminant Analysis and Multi-Linear Singular Value Decomposition.
 
-# Installation and running the notebooks
+[!image]()
 
-## CPU
+BTTDA has been applied to Brain-Computer Interfacing EEG classification problems, but can be used as a general tensor classification method for classifying other neural signals or tensors in general.
 
-1. Install the package using pip:
+# Installation and dependencies
+
+Install `bttda` using
+```sh
+pip install git+https://github.com/arnevdk/bttda.git
 ```
-pip install git+ssh://git@gitlab.kuleuven.be:compneuro/hoda-bci.git[notebooks]
+
+This allows you to use the implemented algorithms with CPU computation.
+
+In some cases, tensor computations might run faster on the GPU. To enable GPU computation:
+
+1. Install [CUDA](https://developer.nvidia.com/cuda-downloads).
+2. Install [cupy](https://docs.cupy.dev/en/stable/install.html).
+3. Install [cuTensor](https://developer.nvidia.com/cutensor) for more efficient GPU tensor computations.
+Install the cuTensor python package for your CUDA and cupy setup according to `cupy`'s [installation instructions](https://docs.cupy.dev/en/stable/install.html) and set it as the default cupy accelerator using
+```sh
+export CUPY_ACCELERATORS=cutensor,cub
 ```
-2. Run the notebooks:
+4. `bttda` uses [tensorly](https://tensorly.org/stable/index.html) as a tensor algebra backend. Ensure `tensorly` uses `cupy` as a GPU backend, set
+```sh
+export TENSORLY_BACKEND=cupy
 ```
+
+To switch back to the CPU backend, set `TENSORLY_BACKEND=numpy`.
+
+
+# Running the notebooks
+
+You can use your current CPU/GPU setup in your python environment, install the notebook dependencies and launch jupyter using
+```sh
+git clone https://github.com/arnevdk/bttda.git
+cd bttda
+pip install .[notebooks]
 jupyter notebook
 ```
 
-## GPU
-
-1. Install [CUDA](https://developer.nvidia.com/cuda-downloads)
-2. Install [cupy](https://docs.cupy.dev/en/stable/install.html)
-3. Install the package using pip:
+Alternatively, we provide a containerized environment for use with podman or Docker which
+sets you up for experimenting on the CPU or GPU avoiding the need to configure the `cupy` backend.
+To run the notebooks with CPU computing, simply run
+```sh
+podman compose up bttda
 ```
-pip install git+ssh://git@gitlab.kuleuven.be:compneuro/hoda-bci.git[notebooks]
+To run with a GPU backend (NVIDIA only), first make sure the  use the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+is installed and you have configured the container runtime or CDI with `nvidia-ctk`.
+Next, boot up the containers with
+```sh
+export TENSORLY_BACKEND=cupy
+podman compose up bttda
 ```
-4. Run the notebooks:
-```
-jupyter notebook
-```
-
-```
-CUPY_ACCELERATORS=cutensor,cub
-TENSORLY_BACKEND=cupy
-```
-
-
-
-## GPU in a container
-
-1. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-2. Generate a CDI for your GPUs
-2. Build or pull the image defined in `Containerfile` as `hoda`
-3. Run the container using a command like the one defined in `podman_run.sh`
 
 # Usage
 
-## TODO:
+# Citing
+```bibtex
+@misc{VanDenKerchove2025b,
+	title={BTTDA: Block-Term Tensor Discriminant Analysis for Brain-Computer Interfacing}, 
+	author={Van Den Kerchove, Arne and Si-Mohammed, Hakim and Cabestaing, François and Van Hulle, Marc M.},
+	year={2025},
+	eprint={2511.04292},
+	archivePrefix={arXiv},
+	primaryClass={eess.SP},
+	url={https://arxiv.org/abs/2511.04292}, 
+}
+```
 
-* [ ] Implement tenalg as tl backend
+A. Van Den Kerchove, H. Si-Mohammed, F. Cabestaing, and M. M. Van Hulle, “BTTDA: Block-Term Tensor Discriminant Analysis for Brain-Computer Interfacing.” 2025. [Online]. Available: https://arxiv.org/abs/2511.04292

@@ -14,7 +14,7 @@ services:
       - $HOME/.ipython:/root/.ipython:Z
     ports:
       - "8888:8888"
-    entrypoint: "jupyter notebook --ip 0.0.0.0 --port 8888 --allow-root --no-browser --NotebookApp.token=abcd"
+    entrypoint: "jupyter notebook --ip 0.0.0.0 --port 8888 --allow-root --no-browser"
     security_opt:
       - "label=disable"
     devices:

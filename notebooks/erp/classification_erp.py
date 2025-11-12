@@ -1,11 +1,8 @@
-import os
-
 import tensorly as tl
-from hoda.classification import BTTDACV, SelectFCutoff, ZScore
+from bttda.classification import BTTDACV, SelectFCutoff, ZScore
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 
@@ -28,6 +25,7 @@ def get_hoda_params():
         taper=False,
         verbose=False,
         refit_shrinkage=True,
+        solver="lanczos",
     )
 
 
@@ -36,13 +34,11 @@ def get_bttda_params():
         hoda_params=get_hoda_params(),
         verbose=False,
         cv=cv,
-        n_jobs=5 * 11,
         clf=make_clf(),
     )
 
 
-def get_pipelines():
-
+def get_pipelines(n_jobs=5 * 11):
     pipelines = dict()
 
     pipelines["HODA"] = Pipeline(
@@ -54,6 +50,7 @@ def get_pipelines():
                 BTTDACV(
                     max_n_blocks=1,
                     thetas=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+                    n_jobs=n_jobs,
                     **get_bttda_params()
                 ),
             ),
@@ -65,7 +62,12 @@ def get_pipelines():
         [
             ("tensorly", FunctionTransformer(tl.tensor)),
             ("zscore1", ZScore()),
-            ("bttda", BTTDACV(max_n_blocks=16, thetas=[0], **get_bttda_params())),
+            (
+                "bttda",
+                BTTDACV(
+                    max_n_blocks=16, thetas=[0], n_jobs=n_jobs, **get_bttda_params()
+                ),
+            ),
             ("clf", make_clf()),
         ]
     )
@@ -79,6 +81,7 @@ def get_pipelines():
                 BTTDACV(
                     max_n_blocks=16,
                     thetas=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+                    n_jobs=n_jobs,
                     **get_bttda_params()
                 ),
             ),
