@@ -330,7 +330,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     forward : bool, default=False
         If True, fit the forward model during `fit`. Otherwise, only fit the backward model.
-    
+
     Attributes
     ----------
     weights_ : list of tensorly.tensor of shape (dim_k, rank_k)
@@ -353,16 +353,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     classes_: list of obj
         List of length n_classes unique classes occuring in `y`, in increasing order.
 
-    means_ : tl.tensor of shape (n_classes, dim_1, dim_2, ..., dim_k)
+    means_ : tensorly.tensor of shape (n_classes, dim_1, dim_2, ..., dim_k)
         Class means.
 
     train_info_ : dict()
-        A dictionary storing statistics gathered during backward and forward 
+        A dictionary storing statistics gathered during backward and forward
         fitting. `train_info_` contains two entries, **'backward'** and **'forward'**,
         respectively storing information from the backward and forward modeling
         algorithm. These each contain a list of dictionaries for each iteration
         storing key-value pairs for that iteration. Following keys are available,
-        if `extra_train_info` is true, keys marked with 'extra' are calculated 
+        if `extra_train_info` is true, keys marked with 'extra' are calculated
         and stored.
 
         Backward:
@@ -374,7 +374,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 Each update per iteration and relies on the previous mode,
                 hence flip indicates the total amount of weight updates so far.
             - **'update'**:
-                The update size as the norm of the difference between the 
+                The update size as the norm of the difference between the
                 current weights and the previous weights for the current mode.
             - **'shrinkage'**: The shrinkage for the current mode.
             - **'objective'**:
@@ -386,7 +386,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         Forward:
             - **'iteration'**,**'mode'** and **'flip'** as above.
             - **'update'**:
-                The update size as the norm of the difference between the 
+                The update size as the norm of the difference between the
                 current activation patterns and the previous activation patterns
                 for the current mode.
             - **mse** (extra): Overall reconstruction Mean Squared Error.
@@ -462,7 +462,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         ----------
         X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
             Training data.
-     
+
         y : array-like of shape (n_samples), default=None
             Class labels.
 
@@ -484,7 +484,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         Fits the backward model. If `self.forward` is True, also fits the
         forward model.
         """
-         X, y = self._validate(X, y)
+        X, y = self._validate(X, y)
         # Calculate means, centering and classes once
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -527,7 +527,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         ----------
         X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
             Training data.
-     
+
         y : array-like of shape (n_samples), default=None
             Class labels.
 
@@ -535,7 +535,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             Precomputed centered input data obtained by subtracting the class
             means from the corresponding class samples to speed up computation.
 
-        means: tl.tensor of shape (n_classes, dim_1, dim_2, ..., dim_k), default=None
+        means: tensorly.tensor of shape (n_classes, dim_1, dim_2, ..., dim_k), default=None
             Precomputed class means to speed up computation.
 
         classes : list, default=None
@@ -748,7 +748,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         ----------
         X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
             Training data.
-     
+
         y : array-like of shape (n_samples), default=None
             Class labels.
 

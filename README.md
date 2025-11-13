@@ -1,9 +1,9 @@
 # BTTDA: Block-Term-Tensor Discriminant Analysis
 
-Python implementation of Block-Term-Tensor Discriminant Analysis (BTTDA), a tensor classification and dimensionality reduction algorithm based on the Block-Term decomposition an Higher-Order Discriminant Analysis. BTTDA iteratively decomposes the input data in discriminant core tensors using a deflation scheme. See [arxiv.org/abs/2511.04292](https://arxiv.org/abs/2511.04292) for the main publication. 
+Python implementation of Block-Term-Tensor Discriminant Analysis (BTTDA), a tensor classification and dimensionality reduction algorithm based on the Block-Term decomposition an Higher-Order Discriminant Analysis. BTTDA iteratively decomposes the input data in discriminant core tensors using a deflation scheme. See [arxiv.org/abs/2511.04292](https://arxiv.org/abs/2511.04292) for the main publication.
 This package also provides python implementations for Higher Order Discriminant Analysis and Multi-Linear Singular Value Decomposition.
 
-[!image]()
+![Illustration of the BTTDA model](fig_bttda.png)
 
 BTTDA has been applied to Brain-Computer Interfacing EEG classification problems, but can be used as a general tensor classification method for classifying other neural signals or tensors in general.
 
@@ -63,13 +63,13 @@ podman compose up bttda
 # Citing
 ```bibtex
 @misc{VanDenKerchove2025b,
-	title={BTTDA: Block-Term Tensor Discriminant Analysis for Brain-Computer Interfacing}, 
+	title={BTTDA: Block-Term Tensor Discriminant Analysis for Brain-Computer Interfacing},
 	author={Van Den Kerchove, Arne and Si-Mohammed, Hakim and Cabestaing, François and Van Hulle, Marc M.},
 	year={2025},
 	eprint={2511.04292},
 	archivePrefix={arXiv},
 	primaryClass={eess.SP},
-	url={https://arxiv.org/abs/2511.04292}, 
+	url={https://arxiv.org/abs/2511.04292},
 }
 ```
 
