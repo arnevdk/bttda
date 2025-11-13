@@ -6,8 +6,66 @@ from sklearn.base import BaseEstimator
 from bttda.util import get_eye, toeplitz
 
 
-def mode_scatter(X, k, weights=None, shrinkage=0, toeplitz=None, assume_centered=False):
-    """Calculate the scatter matrix along a given tensor mode."""
+def mode_scatter(
+    X, k, weights=None, shrinkage=0, toeplitz=False, assume_centered=False
+):
+    """Calculate the scatter matrix of the unfolding of a tensor along a given mode.
+
+    Parameters
+    ----------
+    X : tensorly.tensor of shape (n_samples, dim_1, ..., dim_k, ..., dim_K)
+        The input data.
+    k : int
+        The mode along which to compute the scatter matrix.
+    weights : None or array-like of shape (n_samples)
+        Optional sample weights for weighted scatter matrix.
+
+    shrinkage : {'lw', 'oas', 'ss', 'ell', 'loocv'} default='lw'
+        Shrinkage method or factor used to regularize the within-class scatter
+        matrix.
+
+        - If a **float** between 0.0 and 1.0, the within-class scatter is directly
+          regularized as::
+
+              S_shrunk = (1 - shrinkage) * S + shrinkage * mean(diag(S)) * I
+
+        - If a **string**, the shrinkage factor is estimated automatically using
+          the specified method:
+
+              - **'lw'** : Ledoit–Wolf shrinkage [1].
+              - **'oas'** : Oracle Approximating Shrinkage [2].
+              - **'ss'** : Schäfer–Strimmer shrinkage [3].
+              - **'ell'** : Robust shrinkage for elliptical distributions [4].
+              - **'loocv'** : Closed-form Leave-One-Out Cross-Validation shrinkage [5].
+
+
+    toeplitz : bool, default=False
+        If True, impose a Toeplit matrix structure on the scatter matrix.
+
+    assume_centered : bool, default=False
+        If True, do not center the data by subtracting the mean, instead assume
+        this is already done.
+
+
+
+    References
+    ----------
+    [1] Ledoit, O., & Wolf, M. (2003). Honey, I shrunk the sample covariance
+        matrix. Ledoit, Olivier, and Michael Wolf. "Honey, I shrunk the sample
+        covariance matrix." (2003).
+    [2] Chen, Y., Wiesel, A., Eldar, Y. C., & Hero, A. O. (2010). Shrinkage
+        algorithms for MMSE covariance estimation. IEEE transactions on signal
+        processing, 58(10), 5016-5029.
+    [3] Schäfer, J., & Strimmer, K. (2005). A shrinkage approach to large-scale
+        covariance matrix estimation and implications for functional genomics.
+        Statistical applications in genetics and molecular biology, 4(1).
+    [4] Chen, Y., Wiesel, A., & Hero, A. O. (2011). Robust shrinkage estimation
+        of high-dimensional covariance matrices. IEEE Transactions on Signal
+        Processing, 59(9), 4097-4107.
+    [5] Tong, J., Hu, R., Xi, J., Xiao, Z., Guo, Q., & Yu, Y. (2018). Linear
+        shrinkage estimation of covariance matrices using low-complexity
+        cross-validation. Signal Processing, 148, 223-233.
+    """
 
     n_samples, *shape = X.shape
     order = len(shape)
@@ -24,7 +82,7 @@ def mode_scatter(X, k, weights=None, shrinkage=0, toeplitz=None, assume_centered
     )  # Expands to match X
 
     scatter = tl.tenalg.tensordot(X * weights, X, (modes, modes))
-    if toeplitz is not None and k in toeplitz:
+    if toeplitz:
         scatter = force_toeplitz(scatter)
 
     # Determine shrinkage
@@ -43,7 +101,7 @@ def mode_scatter(X, k, weights=None, shrinkage=0, toeplitz=None, assume_centered
         cov = scatter / (n - 1)
         shrinkage = oas(cov, n)
     elif shrinkage == "ss":
-        shrinkage = schaefer_strimmer_shrinkage(X, k)
+        raise NotImplementedError
     elif shrinkage == "ell":
         raise NotImplementedError
     elif shrinkage == "loocv":
@@ -62,6 +120,20 @@ def mode_scatter(X, k, weights=None, shrinkage=0, toeplitz=None, assume_centered
 
 
 def force_toeplitz(A):
+    """Find the nearest Toeplitz matrix.
+
+    Calculated by setting each subdiagonal to its mean value.
+
+    Parameters
+    ----------
+    A : tensorly.tensor of shape (n,n)
+        Input matrix A.
+
+    Returns
+    -------
+    toep : tensorly.tensor of shape (n,n)
+        The nearest Toeplitz matrix to `A`.
+    """
     n, _ = A.shape
     toep = tl.zeros(n)
     for i in range(n):
@@ -71,6 +143,31 @@ def force_toeplitz(A):
 
 
 def ledoit_wolf_shrinkage(X, emp_cov, assume_centered=True):
+    """Calculate the Ledoit-Wolf shrinkage factor.
+
+    Efficient, GPU cabable `tensorly` implementation of
+    `sklearn.covariance.ledoit_wolf_shrinkage`.
+
+    Parameters
+    ----------
+    X : tensorly.tensor of shape (n_samples, n)
+        Input data
+
+    emp_cov : tensorly.tensor of shape (n,n)
+        Empirical covariance matrix.
+        emp_cov
+
+    assume_centered : bool, default=False
+        If True, do not center the data by subtracting the mean, instead assume
+        this is already done.
+
+    References
+    ----------
+    [1] Ledoit, O., & Wolf, M. (2003). Honey, I shrunk the sample covariance
+        matrix. Ledoit, Olivier, and Michael Wolf. "Honey, I shrunk the sample
+        covariance matrix." (2003).
+
+    """
     n_samples, n_features = X.shape
     if n_features == 1:
         return 0
@@ -98,13 +195,27 @@ def ledoit_wolf_shrinkage(X, emp_cov, assume_centered=True):
 
 
 def oas(emp_cov, n_samples):
-    """Estimate covariance with the Oracle Approximating Shrinkage algorithm.
+    """Calculate the Oracle Approximating Shrinkage factor.
 
-    The formulation is based on [1]_.
-    [1] "Shrinkage algorithms for MMSE covariance estimation.",
-        Chen, Y., Wiesel, A., Eldar, Y. C., & Hero, A. O.
-        IEEE Transactions on Signal Processing, 58(10), 5016-5029, 2010.
-        https://arxiv.org/pdf/0907.4698.pdf
+    Efficient, GPU cabable `tensorly` implementation of
+    `sklearn.covariance.oas`.
+
+    Parameters
+    ----------
+    emp_cov : tensorly.tensor of shape (n,n)
+        Empirical covariance matrix.
+        emp_cov
+
+    n_samples : int
+        Number of samples in the input data.
+
+
+    References
+    ----------
+    [1] Chen, Y., Wiesel, A., Eldar, Y. C., & Hero, A. O. (2010). Shrinkage
+        algorithms for MMSE covariance estimation. IEEE transactions on signal
+        processing, 58(10), 5016-5029.
+
     """
     n_features = emp_cov.shape[0]
     if n_features == 1:

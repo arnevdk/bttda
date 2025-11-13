@@ -251,7 +251,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     rank : int, tuple of int, or None, default=None
         Desired dimensionality (rank) of the core tensor.
 
-        if rank is not None, theta must be None.
+        If rank is not None, theta must be None. If both theta and rank are None
+        rank (dim_1, dim_2, ..., dim_K) is assumed.
 
     theta : float or None, default=None
         Automatically determines the mode ranks based on the explained proportion
@@ -285,21 +286,13 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     shrinkage : {'lw', 'oas', 'ss', 'ell', 'loocv'} or float or tuple of (str or float), default='lw'
         Shrinkage method or factor used to regularize the within-class scatter
-        matrix.
+        matrix. See `bttda.cov.mode_scatter` for available options and further details.
 
         - If a **float** between 0.0 and 1.0, the within-class scatter is directly
-          regularized as::
-
-              S_shrunk = (1 - shrinkage) * S + shrinkage * mean(diag(S)) * I
+          regularized with this factor.
 
         - If a **string**, the shrinkage factor is estimated automatically using
-          the specified method:
-
-              - **'lw'** : Ledoit–Wolf shrinkage.
-              - **'oas'** : Oracle Approximating Shrinkage.
-              - **'ss'** : Schäfer–Strimmer shrinkage.
-              - **'ell'** : Robust shrinkage for elliptical distributions.
-              - **'loocv'** : Closed-form Leave-One-Out Cross-Validation shrinkage.
+          the specified method.
 
         - If a **tuple**, it must contain per-mode specifications (e.g.,
           `(lw', 0.3, 'oas')`) allowing mixed shrinkage settings across tensor modes.
@@ -389,12 +382,12 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 The update size as the norm of the difference between the
                 current activation patterns and the previous activation patterns
                 for the current mode.
-            - **mse** (extra): Overall reconstruction Mean Squared Error.
-            - **nmse** (extra): Overall reconstruction Normalized Mean Squared Error.
+            - **'mse'** (extra): Overall reconstruction Mean Squared Error.
+            - **'nmse'** (extra): Overall reconstruction Normalized Mean Squared Error.
 
 
         `train_info_['backward']` and `train_info_['forward']` can be used to
-        initialize a pandas dataframe.
+        initialize a pandas DataFrame.
 
     rank_: tuple
         A tuple with lenght equaling the tensor order containing the actual rank
@@ -458,6 +451,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def fit(self, X, y, classes=None, class_counts=None):
         """Fit the estimator to the data.
 
+        Fits the backward model. If `self.forward` is True, also fits the
+        forward model.
+
+
         Parameters
         ----------
         X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
@@ -466,11 +463,11 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         y : array-like of shape (n_samples), default=None
             Class labels.
 
-        classes : list
+        classes : list of obj
             List containing precomputed unique class labels in `y` to speed up
             GPU computation.
 
-        class_counts :
+        class_counts : list of int
             Precomputed occurence counts of unique classes in `y` to speed up
             GPU computation.
 
@@ -479,10 +476,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self : object
             Returns the instance itself.
 
-        Notes
-        -----
-        Fits the backward model. If `self.forward` is True, also fits the
-        forward model.
         """
         X, y = self._validate(X, y)
         # Calculate means, centering and classes once
@@ -523,6 +516,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     ):
         """Fit the backward model to the data.
 
+        Calculates `self.weights_`.
         Parameters
         ----------
         X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
@@ -550,10 +544,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         -------
         self : object
             Returns the instance itself.
-
-        Notes
-        -----
-        Calculates `self.weights_`
         """
 
         X, y = self._validate(X, y)
@@ -646,13 +636,16 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def _calculate_scatter_t(self, X_centered, class_counts):
         order = X_centered.ndim - 1
         scatter_t = [None] * order
+        toeplitz = self.toeplitz
+        if toeplitz is None:
+            toeplit = tuple()
         for k in range(order):
             scatter_w, shrinkage = mode_scatter(
                 X_centered,
                 k,
                 assume_centered=True,
                 shrinkage=self.shrinkage,
-                toeplitz=self.toeplitz,
+                toeplitz=k in toeplitz,
             )
             scatter_b, _ = mode_scatter(
                 self.means_, k, weights=class_counts, shrinkage=0
@@ -672,12 +665,15 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             shrinkage = self.shrinkage
 
         # Calculate within class scatter matrix
+        toeplitz = self.toeplitz
+        if toeplitz is None:
+            toeplit = tuple()
         scatter_w, shrinkage = mode_scatter(
             X_centered_proj,
             k,
             assume_centered=True,
             shrinkage=shrinkage,
-            toeplitz=self.toeplitz,
+            toeplitz=k in toeplitz,
         )
 
         # Calculate between class scatter matrix
@@ -744,6 +740,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def fit_forward(self, X, y, X_centered=None, Xt=None):
         """Fit the forward model to the data.
 
+        Calculates `self.activation_patterns_`.
+
         Parameters
         ----------
         X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
@@ -763,10 +761,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         -------
         self : object
             Returns the instance itself.
-
-        Notes
-        -----
-        Calculates `self.activation_patterns_`
         """
         X, y = self._validate(X, y)
         _, *shape = X.shape
@@ -966,7 +960,76 @@ def _forward_stats(X, Xt, X_approx, y):
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
-    """BTTDA."""
+    """Block-Term Tensor Discriminant Analysis (BTTDA) tensor decomposition method.
+
+    Parameters
+    ----------
+    ranks : iterable of length n_blocks,
+        `ranks` determines the number of core blocks to extract and their rank.
+        The length of `ranks` is the number of blocks. Elements can be the
+        accepted values for the `rank` parameter of `HODA`. Must be set.
+
+    hoda_params: dict
+       Parameters to pass to the internal HODA model for the blocks. The `rank`
+       parameter is overriden by the corresponding rank from the `ranks` parameter
+       above.
+
+    extra_train_info : bool, default=False
+        If True, calculate and store additional statistics (e.g., objective values)
+        during iterations. This slows down fitting.
+
+    verbose : bool, default=False
+        If True, print progress information during fitting.
+
+    forward : bool, default=False
+        If True, also fit the forward model for the last block.
+
+    Attributes
+    ---------
+    classes_ : list of obj
+        List of length n_classes unique classes occuring in `y`, in increasing order.
+
+    blocks_ : list of bttda.hoda.HODA
+        List of length n_blocks containing fitted HODA models representing
+        the blocks.
+
+    train_info_ : list of dict
+        A dictionary storing statistics gathered during fitting.
+        `train_info_` is a list of dictionaries for each block, storing
+        key-value pairs for that iteration. Following keys are available,
+        if `extra_train_info` is true, keys marked with 'extra' are calculated
+        and stored.
+
+        - **'block'**: The current block.
+        - **'rank'**: The rank of the current block.
+        - **'F_tr'** (extra): the overall trace-ratio discriminant objective value.
+        - **'F_rt'** (extra): the overall ratio-trace discriminant objective value.
+        - **'mse'** (extra): Overall reconstruction Mean Squared Error.
+        - **'nmse'** (extra): Overall reconstruction Normalized Mean Squared Error.
+
+        `train_info_` can be used to initialize a pandas DataFrame.
+
+    n_blocks_: int
+        The number of extracted blocks. `n_blocks_` can be smaller than the length
+        of `ranks` if errors occured during block fitting.
+
+    n_params_:
+    The total number of parameters in the backward model calculated as
+
+        block_1.n_params_ + block_2.n_params_ + ... + block_K.n_params_
+
+    This is also the number of parameters in the forward model.
+
+
+    Notes
+    -----
+    If `len(ranks)` is 1, only one block is extracted. In this special case, the
+    BTTDA model and the HODA model are equivalent.
+
+    If each element of ranks is 1 or (1, 1, ..., 1), a series of rank 1 blocks
+    is extracted. In this special case, the BTTDA model is called PARAFACDA after
+    the rank-1 PARAFAC/CPD tensor decomposition.
+    """
 
     def __init__(
         self,
@@ -976,25 +1039,42 @@ class BTTDA(BaseEstimator, TransformerMixin):
         verbose=False,
         forward=True,
     ):
-        self.hoda_params = hoda_params
-        self.verbose = verbose
-        self.extra_train_info = extra_train_info
-        self.forward = forward
         self.ranks = ranks
+        self.hoda_params = hoda_params
+        self.extra_train_info = extra_train_info
+        self.verbose = verbose
+        self.forward = forward
+
+    def _validate(self, X, y=None):
+        if not tl.is_tensor(X):
+            raise ValueError("X must be a tensorly tensor object")
+        return X, y
 
     def fit(self, X, y=None, blocks=None):
-        """fit.
+        """Fit the estimator to the data.
 
         Parameters
         ----------
-        X :
-            X
-        y :
-            y
-        blocks :
-            blocks
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Training data.
+
+        y : array-like of shape (n_samples), default=None
+            Class labels.
+
+        blocks : list of HODA, default=None
+            Precomputed list of fitted HODA blocks. If `blocks` is not None set,
+            the `ranks` parameter is ignored for the first set of blocks corresponding
+            to the length of `blocks` and the model is instead specified
+            by these blocks instead of fitting new ones.
+            If the requested number of blocks is greater than the length of `blocks`,
+            further blocks will be fitted given these earlier blocks.
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
         """
-        X, y = validate(X, y)
+        X, y = self._validate(X, y)
         n_samples, *shape = X.shape
 
         self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -1041,17 +1121,6 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return self
 
     def _store_train_info(self, X, y, block):
-        """_store_train_info.
-
-        Parameters
-        ----------
-        X :
-            X
-        y :
-            y
-        block :
-            block
-        """
         train_info_row = dict()
         train_info_row["block"] = self.n_blocks_
         train_info_row["rank"] = block.rank_
@@ -1065,37 +1134,70 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     @property
     def n_blocks_(self):
-        """n_blocks_."""
         return len(self.blocks_)
 
     @property
     def n_params_(self):
-        """n_params_."""
         return sum([b.n_params_ for b in self.blocks_])
 
     def transform(
-        self, X, y=None, blocks=None, n_blocks=None, return_err=False, flatten=True, **_
+        self,
+        X,
+        y=None,
+        blocks=None,
+        n_blocks=None,
+        return_err=False,
+        flatten=True,
+        **kwargs,
     ):
-        """transform.
+        """Transform input data X to the core tensor G.
 
         Parameters
         ----------
-        X :
-            X
-        y :
-            y
-        blocks :
-            blocks
-        n_blocks :
-            n_blocks
-        return_err :
-            return_err
-        flatten :
-            flatten
-        _ :
-            _
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Input data.
+
+        y : ignored, default=None
+
+        blocks : None or iterable of HODA, default=None
+            If `blocks`is not None, use this list of HODA blocks instead of
+            the fitted blocks to perform the transformatoin.
+
+        n_blocks : None or int, default=None
+            Only use the first `n_blocks` blocks of `self.blocks_` or `blocks`
+            to perform the transformation. If None, use all blocks.
+
+        return_err : bool, default is False
+            If True, return the residual error after transforming the input
+            data `X` to the block core tensors.
+
+        flatten: bool, default is True
+            If False, return the transformed block core tensors as a list of
+            tensors with potentially different dimensions. If True, return a
+            flattened output samples as a single array, losing the core tensor
+            structure. This is useful if BTTDA is used for feature extraction.
+
+
+        Returns
+        -------
+        Xt: list of tensorly.tensor of shape (n_samples, rank_1b, rank_2b, ..., rank_Kb) or tensorly.tensoror of shape (n_samples, flattened_ranks)
+            The core tensors of each block after obtained by transforming th
+            residual error in the deflation scheme. The output is either represented
+            as a list of tensors with different shapes like
+
+                [(n_samples, b1_rank_1, ..., b1_rank_K), ..., (n_samples, bB_rank_1, ..., bB_rank_K)]
+
+             if `flatten` is False, or a single array of size (n_samples, flattened_ranks) like
+
+                (n_samples, sum(block_1.rank_) + ... + sum(block_K.rank_))
+
+            if `flatten` is True.
+
+        err : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            The residual error left after extracting each block core tensor
+            in the deflation scheme. Only returned if `return_err` is True.
         """
-        X, y = validate(X, y)
+        X, y = self._validate(X, y)
         n_samples, *_ = X.shape
 
         if blocks is None:
@@ -1119,18 +1221,25 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return Gs
 
     def inv_transform(self, Xt, y=None, n_blocks=None):
-        """inv_transform.
+        """Reconstruct the original data from the flattened block core tensors.
 
         Parameters
         ----------
-        Xt :
-            Xt
-        y :
-            y
-        n_blocks :
-            n_blocks
+        Xt: tensorly.tensor of shape (n_samples, flattened_ranks)
+            Flattened transformed block core tensors.
+
+        y : ignored, default=None
+
+        n_blocks : int or None, default=None
+            If n_blocks is not None, only use the first `n_blocks` blocks of the
+            transformed data to reconstruct the original data.
+
+        Returns
+        -------
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Estimated reconstruction of the original input data.
         """
-        X, y = validate(Xt, y)
+        X, y = self._validate(Xt, y)
         n_samples, _ = Xt.shape
         if n_blocks is None:
             n_blocks = self.n_blocks_
@@ -1149,40 +1258,55 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     @property
     def ranks_(self):
-        """ranks_."""
         return tuple([b.rank_ for b in self.blocks_])
 
 
 def f_multiway(
     X,
-    y=None,
+    y,
     classes=None,
     class_counts=None,
     assume_centered=False,
     means=None,
     method="tr",
-    solver=None,
 ):
     """f_multiway.
+    Calculate MANOVA-like multivariate discriminability F-statistic.
 
     Parameters
     ----------
-    X :
-        X
-    y :
-        y
-    classes :
-        classes
-    class_counts :
-        class_counts
-    assume_centered :
-        assume_centered
-    means :
-        means
-    method :
-        method
-    solver :
-        solver
+    X : tensorly.tensor of shape (n_samples, *shape)
+        Input data.
+
+    y : array-like of obj
+        Class labels of length `n_samples`.
+
+    classes : list of obj or None, default is None
+        List containing precomputed unique class labels in `y` to speed up
+        GPU computation. If None, compute the classes now.
+
+    class_counts : list of int or None, default is None
+        Precomputed occurence counts of unique classes in `y` to speed up
+        GPU computation. If None, compute the class counts now.
+
+    assume_centered : bool, default=False
+        If True, do not center the data by subtracting class means, instead assume
+        this is already done. In this case, `means` must also be set.
+
+    means : tensorly.tensor of shape (n_classes, *shape) or None, default=None
+        Precomputed class means.
+
+    method : {'tr', 'rt'}, default='tr'
+        Determine the multivariate statistic of discriminability as the
+        Trace-Ratio criterion ('tr') or the Ratio-Trace critarion ('rt').
+        Ratio-Trace requires solving a generalized eigenvalue problem, while
+        Trace-Ratio can be computed analytically.
+
+    Returns
+    -------
+    F : float
+        The multivariate statistic of discriminability, either computed as the
+        trace-ratio of the input data or the ratio-trace.
     """
     n_samples, *shape = X.shape
     if not tl.is_tensor(X):
@@ -1230,18 +1354,31 @@ def f_multiway(
 
 
 def f_oneway(X, y, classes=None, class_counts=None):
-    """f_oneway.
+    """Univariate ANOVA discriminability F-statistic.
 
-    Parameters
-    ----------
-    X :
-        X
-    y :
-        y
-    classes :
-        classes
-    class_counts :
-        class_counts
+     ANOVA discriminability statistic as in `scipy.stats.f_oneway` or
+     `sklearn.feature_selection.f_classif`, but implemented for `tensorly`.
+
+     Parameters
+     ----------
+    X : tensorly.tensor of shape (n_samples, *shape)
+         Input data.
+
+     y : array-like of obj
+         Class labels of length `n_samples`.
+
+     classes : list of obj or None, default is None
+         List containing precomputed unique class labels in `y` to speed up
+         GPU computation. If None, compute the classes now.
+
+     class_counts : list of int or None, default is None
+         Precomputed occurence counts of unique classes in `y` to speed up
+         GPU computation. If None, compute the class counts now.
+
+     Returns
+     -------
+     F : tensorly.tensor of shape (*shape)
+         Univariate ANOVA F-statistic for each feature.
     """
     n_samples, *shape = X.shape
     order = len(shape)
