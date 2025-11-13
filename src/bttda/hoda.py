@@ -962,6 +962,26 @@ def _forward_stats(X, Xt, X_approx, y):
 class BTTDA(BaseEstimator, TransformerMixin):
     """Block-Term Tensor Discriminant Analysis (BTTDA) tensor decomposition method.
 
+    BTTDA extends HODA to extract multiple core tensors from the input data instead
+    of only one, effectively decomposing the input data in several blocks. BTTDA
+    works by fitting HODA models in an iterative deflation scheme.
+
+        1. To obtain the first block, the HODA backward model is applied to the
+           input data X to obtain the corresponding core tensor G_1.
+        2. Next, the initial data is reconstructed as X_rec_1 using the forward
+           model of the first block
+        3. Now, the error between the initial data and the reconstructed data
+           is computed as E_1 = X - X_rec_1.
+        4. The core tensor of the second block G_2 is now computed from this error
+           term E by again applying the HODA backward model.
+        5. The input data (now the error E) is again reconstructed from G_2
+           as E_rec_2.
+        6. E_2 is then obtained as E_2 = E_1 - E_rec_2 and HODA is applied to E_2
+        7. This continues for `n_blocks` iterations.
+
+    These blocks extract additional discriminatory information further than the
+    first HODA blocks and can be used for feature extraction.
+
     Parameters
     ----------
     ranks : iterable of length n_blocks,
