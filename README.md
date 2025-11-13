@@ -59,7 +59,89 @@ podman compose up bttda
 ```
 
 # Usage
+BTTDA is based on the Higher-Order Discriminant Analysis model this model can be applied as tensor method to obtain lower-dimensional tensor `Xt` from input tensor `X` such that `Xt` is maximally discriminant between classes in `y`. 
+```python
+import tensorly as tl
+from bttda.hoda import HODA
 
+X = tl.tensor(X) 	# Of shape (n_samples, 10, 10)
+
+hoda = HODA(
+	rank = (5,5), 
+	obj = 'tr',		# Trace-Ratio objective for discriminant analysis 
+	max_iter = 64,
+	tol = 1e-8
+)
+
+Xt = hoda.fit_transform(X,y) # Of shape (n_samples, 5, 5)
+```
+The reduced dimensionality can also automatically be determined based on variance in the data using parameter `theta` :
+```python
+hoda = HODA(
+	theta=0.5
+	obj = 'tr',		# Trace-Ratio objective for discriminant analysis 
+	max_iter = 64,
+	tol = 1e-8
+)
+
+Xt = hoda.fit_transform(X,y) # Of shape e.g. (n_samples, 2, 6)
+```
+`BTTDA` generalizes `HODA` to extract multiple blocks.
+```python
+from bttda.hoda import BTTDA
+
+bttda = BTTDA(
+	ranks = [(2,2), (3,4)],
+	hoda_params = dict(
+		obj = 'tr',	
+		max_iter = 64,
+		tol = 1e-8
+	)
+)
+
+Xt = bttda.fit_transform(X,y)
+# Of shape (n_samples, 16) = (n_samples, 2*2 + 3*4)
+```
+BTTDA and HODA are sensitive to hyperparameter selection. In order
+to automatically tune the hyperparameters through cross-validation, you can use `BTTDACV` in combination with a classifier to score the hyperparameter candidates.
+```python
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from hoda.classification import BTTDACV
+
+clf = make_pipeline(
+	FunctionTransformer(tl.to_numpy()),
+	LinearDiscriminantAnalysis()
+)
+
+bttda = BTTDACV(
+	max_n_blocks = 4,
+	thetas = [0, .25, .5, .75, 1],
+	clf = clf,
+	scorer = 'roc_auc',
+	hoda_params = dict(
+		obj = 'tr',	
+		max_iter = 64,
+		tol = 1e-8
+	)
+)
+
+Xt = bttda.fit_transform(X,y) # With optimal shape determined by cross-validation
+```
+This can then be applied as a dimensionality reduction step in a `scikit-learn` classification pipeline:
+```python
+from bttda.classification import ZScore
+from sklearn.base import clone
+
+pipe = make_pipeline(
+	ZScore(),
+	bttda,
+	clone(clf)
+)
+
+y_pred = pipe.fit_predict(X,y)
+```
 # Citing
 ```bibtex
 @misc{VanDenKerchove2025b,
