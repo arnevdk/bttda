@@ -16,75 +16,196 @@ tl.plugins.use_opt_einsum()
 
 
 def obj_rt(scatter_b, scatter_w, _):
-    """Ratio trace objective Tr(uT Sw^-1 Sb u).
+    """Ratio-trace discriminant analysis objective function.
 
-    Phan, A. H., & Cichocki, A. (2010).
-    Tensor decompositions for feature extraction and classification of high
-    dimensional datasets. Nonlinear theory and its applications, IEICE, 1(1), 37-68.
+    Parameters
+    ----------
+    scatter_b : tensorly.tensor of shape (dim_k, dim_k)
+        Between-class scatter matrix.
 
-    Wang, H., Yan, S., Xu, D., Tang, X., & Huang, T. (2007, June). Trace ratio
-    vs. ratio trace for dimensionality reduction. In 2007 IEEE Conference on
-    Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
+    scatter_w : tensorly.tensor of shape (dim_k, dim_k)
+        Within-class scatter matrix.
 
+    _ : ignored
+        Additional positional argument for compatibility.
+
+    Returns
+    -------
+    A : tensorly.tensor of shape (dim_k, dim_k)
+        Symmetric matrix A for generalized eigendecomposition.
+
+    B : tensorly.tensor of shape (dim_k, dim_k)
+        Symmetric matrix B for generalized eigendecomposition.
+
+    Notes
+    -----
+    The objective is defined as::
+
+        φ = Tr(Uᵀ S_w⁻¹ S_b U)
+
+    References
+    ----------
+    [1] Phan, A. H., & Cichocki, A. (2010).
+        Tensor decompositions for feature extraction and classification of high
+        dimensional datasets. Nonlinear theory and its applications, IEICE,
+        1(1), 37–68.
+
+    [2] Wang, H., Yan, S., Xu, D., Tang, X., & Huang, T. (2007, June).
+        Trace ratio vs. ratio trace for dimensionality reduction.
+        In 2007 IEEE Conference on Computer Vision and Pattern Recognition (pp. 1–8). IEEE.
     """
     return scatter_b, scatter_w
 
 
-def obj_tr(scatter_b, scatter_w, u):
-    """Trace ratio objective Tr(uT Sb u)/Tr(uT Sw u).
+def obj_tr(scatter_b, scatter_w, u, psi=1):
+    """Trace-ratio discriminant analysis objective function.
 
-    Phan, A. H., & Cichocki, A. (2010).
-    Tensor decompositions for feature extraction and classification of high
-    dimensional datasets. Nonlinear theory and its applications, IEICE, 1(1), 37-68.
+    Parameters
+    ----------
+    scatter_b : tensorly.tensor of shape (dim_k, dim_k)
+        Between-class scatter matrix.
 
-    Wang, H., Yan, S., Xu, D., Tang, X., & Huang, T. (2007, June). Trace ratio
-    vs. ratio trace for dimensionality reduction. In 2007 IEEE Conference on
-    Computer Vision and Pattern Recognition (pp. 1-8). IEEE.
+    scatter_w : tensorly.tensor of shape (dim_k, dim_k)
+        Within-class scatter matrix.
+
+    u : tensorly.tensor of shape (dim_k, rank_k)
+
+    psi : float, default=1
+        Scaling factor for the between-within class scatter difference.
+       Initial or previous estimate of the discriminant weights.
+
+    Returns
+    -------
+    A : tensorly.tensor of shape (dim_k, dim_k)
+        Symmetric matrix A for generalized eigendecomposition.
+
+    _ : None
+        Additional output for compatibility.
+
+    Notes
+    -----
+    The objective is defined as::
+
+        φ = Tr(Uᵀ S_b U) / Tr(Uᵀ S_w U)
+
+    References
+    ----------
+    [1] Phan, A. H., & Cichocki, A. (2010).
+        Tensor decompositions for feature extraction and classification of high
+        dimensional datasets. Nonlinear theory and its applications, IEICE,
+        1(1), 37–68.
+
+    [2] Wang, H., Yan, S., Xu, D., Tang, X., & Huang, T. (2007, June).
+        Trace ratio vs. ratio trace for dimensionality reduction.
+        In 2007 IEEE Conference on Computer Vision and Pattern Recognition (pp. 1–8). IEEE.
     """
     scatter_b_t = u.T @ scatter_b @ u
     tr_scatter_b_t = tl.trace(scatter_b_t)
     scatter_w_t = u.T @ scatter_w @ u
     tr_scatter_w_t = tl.trace(scatter_w_t)
     phi = tr_scatter_b_t / tr_scatter_w_t
-    A = scatter_b - phi * scatter_w
+    A = scatter_b - psi * phi * scatter_w
     return A, None
 
 
 def obj_lfl(scatter_b, scatter_w, u, psi=1):
-    """Linear feature learning obbjective.
+    """Linear feature learning discriminant objective function.
 
-    Aghili, S. N., Kilani, S., Khushaba, R. N., & Rouhani, E. (2023).
-    A spatial-temporal linear feature learning algorithm for P300-based -
-    brain-computer interfaces. Heliyon, 9(4).
+    Parameters
+    ----------
+    scatter_b : tensorly.tensor of shape (dim_k, dim_k)
+        Between-class scatter matrix.
+
+    scatter_w : tensorly.tensor of shape (dim_k, dim_k)
+        Within-class scatter matrix.
+
+    u : tensorly.tensor of shape (dim_k, rank_k)
+        Initial or previous estimate of the discriminant weights.
+
+    psi : float, default=1
+        Scaling factor for the between-within class scatter difference.
+
+    Returns
+    -------
+    A : tensorly.tensor of shape (dim_k, dim_k)
+        Symmetric matrix A for generalized eigendecomposition.
+
+    B : tensorly.tensor of shape (dim_k, dim_k)
+        Symmetric matrix B for generalized eigendecomposition.
+
+    References
+    ----------
+    [1] Aghili, S. N., Kilani, S., Khushaba, R. N., & Rouhani, E. (2023).
+        A spatial–temporal linear feature learning algorithm for P300-based
+        brain–computer interfaces. *Heliyon*, 9(4).
     """
     phi = tl.trace(u.T @ scatter_b @ u) / tl.trace(u.T @ scatter_w @ u)
-    A = scatter_b - phi * scatter_w
+    A = scatter_b - psi * phi * scatter_w
     B = scatter_w
     return A, B
 
 
 def obj_od(scatter_b, scatter_w, u):
-    """Optimal dimensionality discriminant analysis
+    """Optimal dimensionality discriminant analysis objective function.
 
-    Nie, F., Xiang, S., Song, Y., & Zhang, C. (2007, April).
-    Extracting the optimal dimensionality for discriminant analysis. In 2007
-    IEEE International Conference on Acoustics, Speech and Signal Processing-ICASSP'07 (Vol. 2, pp. II-617). IEEE.
+    Parameters
+    ----------
+    scatter_b : tensorly.tensor of shape (dim_k, dim_k)
+        Between-class scatter matrix.
 
-    Wang, J., Wang, L., Nie, F., & Li, X. (2021). A novel formulation of trace ratio linear discriminant analysis. IEEE Transactions on Neural Networks and Learning Systems, 33(10), 5568-5578.
+    scatter_w : tensorly.tensor of shape (dim_k, dim_k)
+        Within-class scatter matrix.
+
+    u : tensorly.tensor of shape (dim_k, rank_k)
+        Initial or previous estimate of the discriminant weights.
+
+    Returns
+    -------
+    A : tensorly.tensor of shape (dim_k, dim_k)
+        Symmetric matrix A for eigendecomposition.
+
+    _ : None
+        Additional output for compatibility.
+
+    References
+    ----------
+    [1] Nie, F., Xiang, S., Song, Y., & Zhang, C. (2007, April).
+        Extracting the optimal dimensionality for discriminant analysis.
+        In *ICASSP'07* (Vol. 2, pp. II-617). IEEE.
+
+    [2] Wang, J., Wang, L., Nie, F., & Li, X. (2021).
+        A novel formulation of trace-ratio linear discriminant analysis.
+        *IEEE Transactions on Neural Networks and Learning Systems*, 33(10), 5568–5578.
     """
     s = tl.trace(u.T @ scatter_b @ u) / tl.trace(u.T @ scatter_w @ u)
     return -(s**2 * scatter_w - 2 * s * scatter_b), None
 
 
-def obj_sr(
-    scatter_b,
-    scatter_w,
-    v,
-):
-    """
-    Idaji, M. J., Shamsollahi, M. B.brouillon, & Sardouie, S. H. (2017).
-    Higher order spectral regression discriminant analysis (HOSRDA): A tensor
-    feature reduction method for ERP detection. Pattern Recognition, 70, 152-162.
+def obj_sr(scatter_b, scatter_w, u):
+    """Spectral regression discriminant analysis objective function.
+
+    Parameters
+    ----------
+    scatter_b : tensorly.tensor of shape (dim_k, dim_k)
+        Between-class scatter matrix.
+
+    scatter_w : tensorly.tensor of shape (dim_k, dim_k)
+        Within-class scatter matrix.
+
+    u : tensorly.tensor of shape (dim_k, rank_k)
+        Initial or previous estimate of the discriminant weights.
+
+    Raises
+    ------
+    NotImplementedError
+        This objective function is not yet implemented.
+
+    References
+    ----------
+    [1] Idaji, M. J., Shamsollahi, M. B., & Sardouie, S. H. (2017).
+        Higher order spectral regression discriminant analysis (HOSRDA):
+        A tensor feature reduction method for ERP detection.
+        *Pattern Recognition*, 70, 152–162.
     """
     raise NotImplementedError
 
@@ -98,24 +219,218 @@ OBJECTIVES = dict(
 )
 
 
-def validate(X, y=None):
-    return X, y
-
-
 class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
+    """Higher-Order Discriminant Analysis (HODA) tensor decomposition method.
+
+    HODA [1] efficiently decomposes a tensor X into a low-dimensional core tensor
+    G with per-mode activation matrices Aₖ using per-mode weight matrices Wₖ,
+    such that discriminability between given classes is maximal.
+
+    The backward model obtains G from input data X as::
+
+        G = X ×₁ W₁ ×₂ W₂ × ... ×ₖ Wₖ
+
+    The weights Wₖ are obtained by iteratively solving alternating per-mode
+    generalized eigendecomposition problems.
+
+    The forward model reconstructs X from G as::
+
+        X ≈ G ×₁ A₁ᵀ ×₂ A₂ᵀ × ... ×ₖ Aₖᵀ
+
+    The activations Aₖ are obtained by iteratively solving an alternating
+    least-squares problem.
+
+    This implementation supports multiple discriminant objective functions and
+    solvers for the internal generalized eigenvalue problem. Per-mode scatter
+    matrices can be regularized using one of the available scatter shrinkage
+    methods or by imposing a Toeplitz-matrix structure [2] to improve performance
+    when a mode corresponds to an evenly sampled stationary signal.
+
+    Parameters
+    ----------
+    rank : int, tuple of int, or None, default=None
+        Desired dimensionality (rank) of the core tensor.
+
+        if rank is not None, theta must be None.
+
+    theta : float or None, default=None
+        Automatically determines the mode ranks based on the explained proportion
+        of the per-mode total scatter matrices.
+
+        Values should be 0 ≤ θ ≤ 1, with 0 corresponding to rank (0, 0, ..., 0)
+        and 1 corresponding to rank (dim_1, dim_2, ..., dim_K).
+        If theta is not None, rank must be None.
+
+    obj : {'tr', 'rt', 'lfl', 'od', 'sr'}, default='tr'
+        Discriminant objective used to construct the generalized eigenvalue problem.
+        The following options are available:
+
+        - **'tr'** : *Trace-Ratio* objective
+          Maximizes the ratio of between-class to within-class scatter traces:
+          φ = Tr(Uᵀ S_b U) / Tr(Uᵀ S_w U).
+
+        - **'rt'** : *Ratio-Trace* objective
+          Equivalent to classical Fisher Discriminant Analysis; maximizes
+          Tr(Uᵀ S_w⁻¹ S_b U).
+
+        - **'lfl'** : *Linear Feature Learning* objective.
+          approximates a mix of trace-ratio and ratio-trace discriminant analysis.
+
+        - **'od'** : *Optimal Dimensionality* objective.
+          Automatically determines the most discriminative subspace dimension
+          by optimizing a quadratic trace-ratio formulation.
+
+        - **'sr'** : *Spectral Regression* objective.
+          (Not yet implemented.)
+
+    shrinkage : {'lw', 'oas', 'ss', 'ell', 'loocv'} or float or tuple of (str or float), default='lw'
+        Shrinkage method or factor used to regularize the within-class scatter
+        matrix.
+
+        - If a **float** between 0.0 and 1.0, the within-class scatter is directly
+          regularized as::
+
+              S_shrunk = (1 - shrinkage) * S + shrinkage * mean(diag(S)) * I
+
+        - If a **string**, the shrinkage factor is estimated automatically using
+          the specified method:
+
+              - **'lw'** : Ledoit–Wolf shrinkage.
+              - **'oas'** : Oracle Approximating Shrinkage.
+              - **'ss'** : Schäfer–Strimmer shrinkage.
+              - **'ell'** : Robust shrinkage for elliptical distributions.
+              - **'loocv'** : Closed-form Leave-One-Out Cross-Validation shrinkage.
+
+        - If a **tuple**, it must contain per-mode specifications (e.g.,
+          `(lw', 0.3, 'oas')`) allowing mixed shrinkage settings across tensor modes.
+
+    toeplitz : tuple of int or None, default=None
+        Modes for which to impose a Toeplitz structure on the within-class scatter matrix.
+
+    solver : {'lanczos', 'lobpcg', 'svd'}, default='lanczos'
+        Method for solving the generalized eigenvalue problem.
+        'svd' can only be used with objectives yielding symmetric
+        positive definite problems (currently only 'rt').
+
+    max_iter : int, default=256
+        Maximum number of iterations for backward and forward solving.
+
+    tol : float, default=1e-8
+        Convergence tolerance for early stopping when updates are small.
+
+    solver_params : dict or None, default=None
+        Additional keyword arguments passed to the eigendecomposition solver.
+
+    verbose : bool, default=False
+        If True, print progress information during fitting.
+
+    extra_train_info : bool, default=False
+        If True, calculate and store additional statistics (e.g., objective values)
+        during iterations. This slows down fitting.
+
+    forward : bool, default=False
+        If True, fit the forward model during `fit`. Otherwise, only fit the backward model.
+    
+    Attributes
+    ----------
+    weights_ : list of tensorly.tensor of shape (dim_k, rank_k)
+        List of per-mode projection matrices Wₖ, each of size
+        ``(dim_k, rank_k)``, where ``dim_k`` is the size of mode *k* of the
+        input tensor. The list length equals the tensor order. These matrices
+        define the backward (discriminant) model:
+
+            G = X ×₁ W₁ ×₂ W₂ × ... ×ₖ Wₖ
+
+    activation_patterns_: list of tensorly.tensor of shape (dim_k, rank_k)
+        List of per-mode reconstruction matrices Aₖ computed when
+        the forward model is fitted (i.e., when ``forward=True``). They define
+        the reconstruction of X from the core tensor G as:
+
+            X ≈ G ×₁ A₁ᵀ ×₂ A₂ᵀ × ... ×ₖ Aₖᵀ
+
+        Only set when using `fit` when  `forward=True` or when using `fit_foward`.
+
+    classes_: list of obj
+        List of length n_classes unique classes occuring in `y`, in increasing order.
+
+    means_ : tl.tensor of shape (n_classes, dim_1, dim_2, ..., dim_k)
+        Class means.
+
+    train_info_ : dict()
+        A dictionary storing statistics gathered during backward and forward 
+        fitting. `train_info_` contains two entries, **'backward'** and **'forward'**,
+        respectively storing information from the backward and forward modeling
+        algorithm. These each contain a list of dictionaries for each iteration
+        storing key-value pairs for that iteration. Following keys are available,
+        if `extra_train_info` is true, keys marked with 'extra' are calculated 
+        and stored.
+
+        Backward:
+            - **'iteration'**:
+                The outer loop iteration. A step for each mode is performed
+                per iteration.
+            - **'mode'**: The mode for which the current statistics are calculated.
+            - **'flip'**:
+                Each update per iteration and relies on the previous mode,
+                hence flip indicates the total amount of weight updates so far.
+            - **'update'**:
+                The update size as the norm of the difference between the 
+                current weights and the previous weights for the current mode.
+            - **'shrinkage'**: The shrinkage for the current mode.
+            - **'objective'**:
+                The mode discriminant objective value calculated as the sum of
+                the eigenvalues of the generalized eigenvalue problem.
+            - **'F_tr'** (extra): the overall trace-ratio discriminant objective value.
+            - **'F_rt'** (extra): the overall ratio-trace discriminant objective value.
+
+        Forward:
+            - **'iteration'**,**'mode'** and **'flip'** as above.
+            - **'update'**:
+                The update size as the norm of the difference between the 
+                current activation patterns and the previous activation patterns
+                for the current mode.
+            - **mse** (extra): Overall reconstruction Mean Squared Error.
+            - **nmse** (extra): Overall reconstruction Normalized Mean Squared Error.
+
+
+        `train_info_['backward']` and `train_info_['forward']` can be used to
+        initialize a pandas dataframe.
+
+    rank_: tuple
+        A tuple with lenght equaling the tensor order containing the actual rank
+        calculated using `theta` or set as `rank`.
+
+    n_params_: int
+        The total number of parameters in the backward model calculated as
+
+            dim_1*rank_1 + dim_2*rank_2 + ... + dim_K*rank_K
+
+        This is also the number of parameters in the forward model.
+
+    References
+    ----------
+    [1] Phan, A. H., & Cichocki, A. (2010).
+        Tensor decompositions for feature extraction and classification of high
+        dimensional datasets. *Nonlinear Theory and Its Applications, IEICE*, 1(1), 37–68.
+
+    [2] Van den Kerchove, A., Libert, A., Wittevrongel, B., & Van Hulle, M. M. (2022).
+        Classification of event-related potentials with regularized spatiotemporal
+        LCMV beamforming. *Applied Sciences*, 12(6), 2918.
+    """
+
     def __init__(
         self,
-        max_iter=256,
-        tol=1e-8,
         rank=None,
+        theta=None,
+        obj="tr",
         shrinkage="lw",
         toeplitz=None,
-        obj="tr",
         solver="lanczos",
-        verbose=False,
+        max_iter=256,
+        tol=1e-8,
         solver_params=None,
+        verbose=False,
         extra_train_info=False,
-        theta=None,
         forward=False,
     ):
         self.max_iter = max_iter
@@ -141,7 +456,35 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return X, y
 
     def fit(self, X, y, classes=None, class_counts=None):
-        X, y = self._validate(X, y)
+        """Fit the estimator to the data.
+
+        Parameters
+        ----------
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Training data.
+     
+        y : array-like of shape (n_samples), default=None
+            Class labels.
+
+        classes : list
+            List containing precomputed unique class labels in `y` to speed up
+            GPU computation.
+
+        class_counts :
+            Precomputed occurence counts of unique classes in `y` to speed up
+            GPU computation.
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+
+        Notes
+        -----
+        Fits the backward model. If `self.forward` is True, also fits the
+        forward model.
+        """
+         X, y = self._validate(X, y)
         # Calculate means, centering and classes once
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
@@ -178,6 +521,41 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         classes=None,
         class_counts=None,
     ):
+        """Fit the backward model to the data.
+
+        Parameters
+        ----------
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Training data.
+     
+        y : array-like of shape (n_samples), default=None
+            Class labels.
+
+        X_centered : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K), default=None
+            Precomputed centered input data obtained by subtracting the class
+            means from the corresponding class samples to speed up computation.
+
+        means: tl.tensor of shape (n_classes, dim_1, dim_2, ..., dim_k), default=None
+            Precomputed class means to speed up computation.
+
+        classes : list, default=None
+            List of length n_classes containing precomputed unique class labels in `y` to speed up
+            GPU computation.
+
+        class_counts : list, default=None
+            List of length n_classes containing precomputed occurence counts of unique classes in `y` to speed up
+            GPU computation.
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+
+        Notes
+        -----
+        Calculates `self.weights_`
+        """
+
         X, y = self._validate(X, y)
         _, *shape = X.shape
         order = len(shape)
@@ -211,7 +589,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         iterator = range(1, self.max_iter + 1)
         if self.verbose:
             iterator = tqdm(iterator, position=0, leave=True)
-        for self.iter_ in iterator:
+        for self._iter in iterator:
             converged = True
             for k in range(order):
 
@@ -263,6 +641,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             warnings.warn(
                 "Maximum number of iterations reached without convergence in backward fitting"
             )
+        return self
 
     def _calculate_scatter_t(self, X_centered, class_counts):
         order = X_centered.ndim - 1
@@ -350,19 +729,45 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
     def _store_backward_train_info(self, X, y, k, update, shrinkage, w):
         order = X.ndim - 1
         train_info_row = dict(
-            iteration=self.iter_,
+            iteration=self._iter,
             mode=k + 1,
-            flip=(self.iter_ - 1) * order + k + 1,
+            flip=(self._iter - 1) * order + k + 1,
             update=float(update),
             shrinkage=float(shrinkage),
             objective=float(tl.sum(tl.abs(w))),
         )
         if self.extra_train_info:
             Xt = self.transform(X)
-            train_info_row.update(backward_stats(Xt, y))
+            train_info_row.update(_backward_stats(Xt, y))
         self.train_info_["backward"].append(train_info_row)
 
     def fit_forward(self, X, y, X_centered=None, Xt=None):
+        """Fit the forward model to the data.
+
+        Parameters
+        ----------
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Training data.
+     
+        y : array-like of shape (n_samples), default=None
+            Class labels.
+
+        X_centered : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K), default=None
+            Precomputed centered input data obtained by subtracting the class
+            means from the corresponding class samples to speed up computation.
+
+        Xt : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K), default=None
+            Precomputed core tensor G to speed up computation.
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+
+        Notes
+        -----
+        Calculates `self.activation_patterns_`
+        """
         X, y = self._validate(X, y)
         _, *shape = X.shape
         order = len(shape)
@@ -407,6 +812,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             warnings.warn(
                 "Maximum number of iterations reached without convergence in forward fitting"
             )
+        return self
 
     def _solve_forward_step(self, X, G, k, lambda_=0.0):
         # Least squares regression
@@ -438,7 +844,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         if self.extra_train_info:
             Xt = self.transform(X)
             X_approx = self.inv_transform(Xt)
-            train_info_row.update(forward_stats(X, Xt, X_approx, y))
+            train_info_row.update(_forward_stats(X, Xt, X_approx, y))
         self.train_info_["forward"].append(train_info_row)
 
     def _init_backward(self, X):
@@ -484,6 +890,22 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             self.aps_.append(tl.copy(w))
 
     def transform(self, X, y=None):
+        """Transform input data X to the core tensor G.
+
+        Parameters
+        ----------
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Input data.
+
+        y : ignored, default=None
+
+        Returns
+        -------
+        Xt: tensorly.tensor of shape (n_samples, rank_1, rank_2, ..., rank_K)
+            Core tensor G obtained as
+
+                G = X ×₁ W₁ ×₂ W₂ × ... ×ₖ Wₖ
+        """
         X, y = self._validate(X, y)
         order = len(X.shape) - 1
         Xt = tl.tenalg.multi_mode_dot(
@@ -492,6 +914,22 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return Xt
 
     def inv_transform(self, Xt, y=None):
+        """Reconstruct the original data from the core tensor G.
+
+        Parameters
+        ----------
+        Xt: tensorly.tensor of shape (n_samples, rank_1, rank_2, ..., rank_K)
+            Core tensor G.
+
+        y : ignored, default=None
+
+        Returns
+        -------
+        X : tensorly.tensor of shape (n_samples, dim_1, dim_2, ..., dim_K)
+            Estimated reconstruction of the original input data obtained as
+
+                X ≈ G ×₁ A₁ᵀ ×₂ A₂ᵀ × ... ×ₖ Aₖᵀ
+        """
         Xt, y = self._validate(Xt, y)
         order = Xt.ndim - 1
         modes = [k + 1 for k in range(order)]
@@ -507,7 +945,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         return sum([s.size for s in self.weights_])
 
 
-def backward_stats(Xt, y):
+def _backward_stats(Xt, y):
     n, *shape = Xt.shape
     p = math.prod(shape)
     stats = {
@@ -517,7 +955,7 @@ def backward_stats(Xt, y):
     return stats
 
 
-def forward_stats(X, Xt, X_approx, y):
+def _forward_stats(X, Xt, X_approx, y):
     mse = tl.metrics.regression.MSE(X, X_approx)
     nmse = mse / tl.metrics.regression.MSE(X, 0)
     stats = {
@@ -528,6 +966,8 @@ def forward_stats(X, Xt, X_approx, y):
 
 
 class BTTDA(BaseEstimator, TransformerMixin):
+    """BTTDA."""
+
     def __init__(
         self,
         ranks=None,
@@ -543,6 +983,17 @@ class BTTDA(BaseEstimator, TransformerMixin):
         self.ranks = ranks
 
     def fit(self, X, y=None, blocks=None):
+        """fit.
+
+        Parameters
+        ----------
+        X :
+            X
+        y :
+            y
+        blocks :
+            blocks
+        """
         X, y = validate(X, y)
         n_samples, *shape = X.shape
 
@@ -590,6 +1041,17 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return self
 
     def _store_train_info(self, X, y, block):
+        """_store_train_info.
+
+        Parameters
+        ----------
+        X :
+            X
+        y :
+            y
+        block :
+            block
+        """
         train_info_row = dict()
         train_info_row["block"] = self.n_blocks_
         train_info_row["rank"] = block.rank_
@@ -597,21 +1059,42 @@ class BTTDA(BaseEstimator, TransformerMixin):
         if self.extra_train_info:
             Xt = self.transform(X)
             X_approx = self.inv_transform(Xt)
-            train_info_row.update(backward_stats(Xt, y))
-            train_info_row.update(forward_stats(X, Xt, X_approx, y))
+            train_info_row.update(_backward_stats(Xt, y))
+            train_info_row.update(_forward_stats(X, Xt, X_approx, y))
         self.train_info_.append(train_info_row)
 
     @property
     def n_blocks_(self):
+        """n_blocks_."""
         return len(self.blocks_)
 
     @property
     def n_params_(self):
+        """n_params_."""
         return sum([b.n_params_ for b in self.blocks_])
 
     def transform(
         self, X, y=None, blocks=None, n_blocks=None, return_err=False, flatten=True, **_
     ):
+        """transform.
+
+        Parameters
+        ----------
+        X :
+            X
+        y :
+            y
+        blocks :
+            blocks
+        n_blocks :
+            n_blocks
+        return_err :
+            return_err
+        flatten :
+            flatten
+        _ :
+            _
+        """
         X, y = validate(X, y)
         n_samples, *_ = X.shape
 
@@ -636,6 +1119,17 @@ class BTTDA(BaseEstimator, TransformerMixin):
         return Gs
 
     def inv_transform(self, Xt, y=None, n_blocks=None):
+        """inv_transform.
+
+        Parameters
+        ----------
+        Xt :
+            Xt
+        y :
+            y
+        n_blocks :
+            n_blocks
+        """
         X, y = validate(Xt, y)
         n_samples, _ = Xt.shape
         if n_blocks is None:
@@ -655,6 +1149,7 @@ class BTTDA(BaseEstimator, TransformerMixin):
 
     @property
     def ranks_(self):
+        """ranks_."""
         return tuple([b.rank_ for b in self.blocks_])
 
 
@@ -668,6 +1163,27 @@ def f_multiway(
     method="tr",
     solver=None,
 ):
+    """f_multiway.
+
+    Parameters
+    ----------
+    X :
+        X
+    y :
+        y
+    classes :
+        classes
+    class_counts :
+        class_counts
+    assume_centered :
+        assume_centered
+    means :
+        means
+    method :
+        method
+    solver :
+        solver
+    """
     n_samples, *shape = X.shape
     if not tl.is_tensor(X):
         X = tl.tensor(X)
@@ -714,6 +1230,19 @@ def f_multiway(
 
 
 def f_oneway(X, y, classes=None, class_counts=None):
+    """f_oneway.
+
+    Parameters
+    ----------
+    X :
+        X
+    y :
+        y
+    classes :
+        classes
+    class_counts :
+        class_counts
+    """
     n_samples, *shape = X.shape
     order = len(shape)
     if classes is None or class_counts is None:

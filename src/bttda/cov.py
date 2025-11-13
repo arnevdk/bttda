@@ -44,17 +44,13 @@ def mode_scatter(X, k, weights=None, shrinkage=0, toeplitz=None, assume_centered
         shrinkage = oas(cov, n)
     elif shrinkage == "ss":
         shrinkage = schaefer_strimmer_shrinkage(X, k)
-    elif shrinkage == "ell1":
-        raise NotImplementedError
-    elif shrinkage == "ell2":
-        raise NotImplementedError
-    elif shrinkage == "ell3":
+    elif shrinkage == "ell":
         raise NotImplementedError
     elif shrinkage == "loocv":
         raise NotImplementedError
     elif isinstance(shrinkage, str):
         raise ValueError(
-            "shrinkage should be either float or one of ['lw', 'oas', 'ss', 'ell1', 'ell2', 'ell3', 'loocv']"
+            "shrinkage should be either float or one of ['lw', 'oas', 'ss', 'ell', 'loocv']"
         )
 
     trace = tl.trace(scatter)
