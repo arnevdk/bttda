@@ -22,7 +22,6 @@ def get_hoda_params():
     return dict(
         max_iter=128,
         toeplitz=(1,),
-        taper=False,
         verbose=False,
         solver="lanczos",
     )

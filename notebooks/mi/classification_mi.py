@@ -4,22 +4,20 @@ import numpy as np
 import pywt
 import scipy.signal
 import tensorly as tl
-from hoda.classification import BTTDACV, SelectFCutoff, ZScore
-from mne.filter import filter_data
+from bttda.classification import BTTDACV, SelectFCutoff, ZScore
 from mne.time_frequency import tfr_array_morlet
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline, make_pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
-from sklearn.svm import SVC
+from sklearn.preprocessing import FunctionTransformer
 
 cv = StratifiedKFold(random_state=42, shuffle=True)
 
 
 def make_clf():
     return make_pipeline(
+        ZScore(),
         FunctionTransformer(tl.to_numpy),
         PCA(n_components=None, whiten=True),
         SelectFCutoff(cutoff=1),
@@ -31,7 +29,6 @@ def get_hoda_params():
     return dict(
         max_iter=512,
         toeplitz=None,
-        taper=False,
         verbose=False,
         tol=1e-4,
         solver="lanczos",
@@ -39,9 +36,7 @@ def get_hoda_params():
 
 
 def get_bttda_params():
-    return dict(
-        hoda_params=get_hoda_params(), verbose=False, cv=cv, n_jobs=1, clf=make_clf()
-    )
+    return dict(hoda_params=get_hoda_params(), verbose=False, cv=cv, clf=make_clf())
 
 
 def stf_transform(X, sfreq=250, downsample_factor=20, f_min=8, f_max=32, n_freqs=16):
@@ -59,7 +54,7 @@ def stf_transform(X, sfreq=250, downsample_factor=20, f_min=8, f_max=32, n_freqs
     return X_tfr_sub
 
 
-def get_pipelines_mi():
+def get_pipelines_mi(n_jobs=5 * 11):
     pipelines = dict()
 
     pipelines["HODA"] = Pipeline(
@@ -72,7 +67,8 @@ def get_pipelines_mi():
                     max_n_blocks=1,
                     # thetas=[0.0 ,0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 1.0],
                     thetas=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                    **get_bttda_params()
+                    n_jobs=n_jobs,
+                    **get_bttda_params(),
                 ),
             ),
             ("clf", make_clf()),
@@ -83,7 +79,12 @@ def get_pipelines_mi():
         [
             ("tensorly", FunctionTransformer(tl.tensor)),
             ("zscore1", ZScore()),
-            ("bttda", BTTDACV(max_n_blocks=16, thetas=[0], **get_bttda_params())),
+            (
+                "bttda",
+                BTTDACV(
+                    max_n_blocks=16, thetas=[0], n_jobs=n_jobs, **get_bttda_params()
+                ),
+            ),
             ("clf", make_clf()),
         ]
     )
@@ -96,9 +97,9 @@ def get_pipelines_mi():
                 "bttda",
                 BTTDACV(
                     max_n_blocks=16,
-                    # thetas=[0.0 ,0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 1.0],
                     thetas=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                    **get_bttda_params()
+                    n_jobs=n_jobs,
+                    **get_bttda_params(),
                 ),
             ),
             ("clf", make_clf()),

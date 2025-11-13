@@ -20,6 +20,7 @@ setup(
             "pywavelets",
             "jupyter<4",
             "plotly",
+            "h5io",
         ],
         "hpc": [
             "dask",

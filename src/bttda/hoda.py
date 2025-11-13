@@ -5,7 +5,7 @@ import numpy as np
 import tensorly as tl
 from numpy.linalg import LinAlgError
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV
 from tqdm import tqdm
 
 from bttda.cov import mode_scatter
@@ -110,7 +110,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         rank=None,
         shrinkage="lw",
         toeplitz=None,
-        taper=False,
         obj="tr",
         solver="lanczos",
         verbose=False,
@@ -129,7 +128,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         self.verbose = verbose
         self.solver_params = solver_params
         self.extra_train_info = extra_train_info
-        self.taper = taper
         self.theta = theta
         self.forward = forward
 
@@ -144,7 +142,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
 
     def fit(self, X, y, classes=None, class_counts=None):
         X, y = self._validate(X, y)
-        # Calculate means, centering and classes once (slow on GPU)
+        # Calculate means, centering and classes once
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
             class_order = np.argsort(self.classes_)
@@ -152,10 +150,8 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             class_counts = tl.tensor(class_counts[class_order])
         else:
             self.classes_ = classes
-
         self.classes_, class_counts = np.unique(y, return_counts=True)
         class_counts = tl.tensor(class_counts)
-
         self.means_, X_centered = center(X, y, self.classes_)
 
         # Fit backward model
@@ -186,7 +182,7 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
         _, *shape = X.shape
         order = len(shape)
 
-        # Determine classes and means and center data
+        # Determine classes and means and center data if not yet done in fit
         if classes is None or class_counts is None:
             self.classes_, class_counts = np.unique(y, return_counts=True)
             class_order = np.argsort(self.classes_)
@@ -263,13 +259,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             if converged:
                 break
 
-        # Convert train_info to list dict
-        self.train_info_["backward"] = {
-            k: [dic[k] for dic in self.train_info_["backward"]]
-            for k in self.train_info_["backward"][0]
-        }
         if not converged:
-            warnings.warn("Maximum number of iterations reached without convergence")
+            warnings.warn(
+                "Maximum number of iterations reached without convergence in backward fitting"
+            )
 
     def _calculate_scatter_t(self, X_centered, class_counts):
         order = X_centered.ndim - 1
@@ -281,7 +274,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
                 assume_centered=True,
                 shrinkage=self.shrinkage,
                 toeplitz=self.toeplitz,
-                taper=self.taper,
             )
             scatter_b, _ = mode_scatter(
                 self.means_, k, weights=class_counts, shrinkage=0
@@ -307,7 +299,6 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             assume_centered=True,
             shrinkage=shrinkage,
             toeplitz=self.toeplitz,
-            taper=self.taper,
         )
 
         # Calculate between class scatter matrix
@@ -412,10 +403,10 @@ class HODA(BaseEstimator, TransformerMixin, ClassifierMixin):
             if converged:
                 break
 
-        self.train_info_["forward"] = {
-            k: [dic[k] for dic in self.train_info_["forward"]]
-            for k in self.train_info_["forward"][0]
-        }
+        if not converged:
+            warnings.warn(
+                "Maximum number of iterations reached without convergence in forward fitting"
+            )
 
     def _solve_forward_step(self, X, G, k, lambda_=0.0):
         # Least squares regression
@@ -589,26 +580,26 @@ class BTTDA(BaseEstimator, TransformerMixin):
                 block.fit_forward(err, y, Xt=G)
                 err -= block.inv_transform(G)
 
-                # Calculate train info
-                train_info_row = dict()
-                train_info_row["block"] = self.n_blocks_
-                train_info_row["rank"] = block.rank_
+                # Store train info
+                self._store_train_info(X, y, block)
 
-                if self.extra_train_info:
-                    Xt = self.transform(X)
-                    X_approx = self.inv_transform(Xt)
-                    train_info_row.update(backward_stats(Xt, y))
-                    train_info_row.update(forward_stats(X, Xt, X_approx, y))
-                self.train_info_.append(train_info_row)
             except (LinAlgError, ValueError) as e:
                 warnings.warn(RuntimeWarning(str(e)))
                 break
 
-        # Convert train info to list dict
-        # self.train_info_ = {
-        #    k: [dic[k] for dic in self.train_info_] for k in self.train_info_[0]
-        # }
         return self
+
+    def _store_train_info(self, X, y, block):
+        train_info_row = dict()
+        train_info_row["block"] = self.n_blocks_
+        train_info_row["rank"] = block.rank_
+
+        if self.extra_train_info:
+            Xt = self.transform(X)
+            X_approx = self.inv_transform(Xt)
+            train_info_row.update(backward_stats(Xt, y))
+            train_info_row.update(forward_stats(X, Xt, X_approx, y))
+        self.train_info_.append(train_info_row)
 
     @property
     def n_blocks_(self):

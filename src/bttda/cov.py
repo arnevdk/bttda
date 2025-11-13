@@ -6,9 +6,7 @@ from sklearn.base import BaseEstimator
 from bttda.util import get_eye, toeplitz
 
 
-def mode_scatter(
-    X, k, weights=None, shrinkage=0, toeplitz=None, taper=False, assume_centered=False
-):
+def mode_scatter(X, k, weights=None, shrinkage=0, toeplitz=None, assume_centered=False):
     """Calculate the scatter matrix along a given tensor mode."""
 
     n_samples, *shape = X.shape
@@ -27,7 +25,7 @@ def mode_scatter(
 
     scatter = tl.tenalg.tensordot(X * weights, X, (modes, modes))
     if toeplitz is not None and k in toeplitz:
-        scatter = force_toeplitz(scatter, taper=taper)
+        scatter = force_toeplitz(scatter)
 
     # Determine shrinkage
     if shrinkage == "lw":
@@ -67,16 +65,12 @@ def mode_scatter(
     return scatter, shrinkage
 
 
-def force_toeplitz(A, taper=False):
+def force_toeplitz(A):
     n, _ = A.shape
     toep = tl.zeros(n)
     for i in range(n):
         diag = tl.diag(A, k=i)
         toep[i] = tl.mean(diag)
-
-    if taper:
-        taper = tl.arange(len(toep), 0, -1) - 1
-        toep = toep * taper
     return toeplitz(toep)
 
 
